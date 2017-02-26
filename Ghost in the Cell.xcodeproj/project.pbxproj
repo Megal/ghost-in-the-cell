@@ -8,23 +8,26 @@
 
 /* Begin PBXBuildFile section */
 		24F38E8E1E620238004E8BA2 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24F38E8D1E620238004E8BA2 /* main.swift */; };
+		24F38E951E62039E004E8BA2 /* input.txt in CopyFiles */ = {isa = PBXBuildFile; fileRef = 24F38E941E62037D004E8BA2 /* input.txt */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
 		24F38E881E620238004E8BA2 /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = /usr/share/man/man1/;
-			dstSubfolderSpec = 0;
+			buildActionMask = 12;
+			dstPath = "";
+			dstSubfolderSpec = 7;
 			files = (
+				24F38E951E62039E004E8BA2 /* input.txt in CopyFiles */,
 			);
-			runOnlyForDeploymentPostprocessing = 1;
+			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		24F38E8A1E620238004E8BA2 /* Ghost in the Cell */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "Ghost in the Cell"; sourceTree = BUILT_PRODUCTS_DIR; };
 		24F38E8D1E620238004E8BA2 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		24F38E941E62037D004E8BA2 /* input.txt */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = input.txt; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -58,6 +61,7 @@
 			isa = PBXGroup;
 			children = (
 				24F38E8D1E620238004E8BA2 /* main.swift */,
+				24F38E941E62037D004E8BA2 /* input.txt */,
 			);
 			path = "Ghost in the Cell";
 			sourceTree = "<group>";
