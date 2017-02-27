@@ -30,6 +30,9 @@ typealias Int2d = (x: Int, y: Int)
 func +(a: Int2d, b: Int2d) -> Int2d { return (a.x+b.x, a.y+b.y) }
 func -(a: Int2d, b: Int2d) -> Int2d { return (a.x-b.x, a.y-b.y) }
 
+// MARK: - Graph theory
+typealias Edge = (u: Int, v: Int)
+
 // MARK: - Random helpers
 
 func xorshift128plus(seed0 : UInt64, seed1 : UInt64) -> () -> UInt64 {
@@ -176,6 +179,10 @@ struct Factory {
 		set { entity.arg3 = newValue }
 	}
 
+	static let ownerMe = 1
+	static let ownerOpponent = -1
+	static let ownerNeutral = 0
+
 	init?(entity: Entity) {
 		guard entity.type == .factory else { return nil }
 		self.entity = entity
@@ -230,21 +237,143 @@ struct Troop {
 	}
 }
 
+class World {
+
+	static var factoryCount = 0 // 7 ≤ factoryCount ≤ 15
+	static var linkCount = 0 // 21 ≤ linkCount ≤ 105
+
+	var factories: [Int: Factory] = [:]
+	var adjList: [[Int]] = []
+	var distance: [[Int]] = []
+	var troops: [Troop] = []
+}
+
+enum Action {
+
+	case wait
+	case move(u: Int, v: Int, count: Int)
+
+	var description: String {
+		switch self {
+		case .wait:
+			return "WAIT"
+		case .move(let u, let v, let count):
+			return "MOVE \(u) \(v) \(count)"
+		}
+	}
+}
+
+protocol StrategyProtocol {
+
+	var possible: Bool { get }
+	var action: Action { get }
+}
+
+struct WaitStrategy: StrategyProtocol {
+
+	var possible = true
+	var action = Action.wait
+}
+
+struct ExpandToNearest: StrategyProtocol {
+
+	/// world
+	var world: World
+	/// all owned factories
+	var owned: [Int] = []
+	// all unowned factories reachable from owned
+	var unownedReachable: Set<Int> = []
+
+	var bestDistance = 999
+	var bestEdge: Edge? = nil
+
+	init(world: World) {
+		self.world = world
+
+		markOwned()
+		markUnownedReachable()
+		evalBestEdge()
+	}
+
+	mutating func markOwned() {
+		for (id, factory) in world.factories {
+			if factory.owner == Factory.ownerMe {
+				owned.append(id)
+			}
+		}
+	}
+
+	/// Visit all unowned factories adjcent to owned
+	mutating func markUnownedReachable() {
+		for u in owned {
+			for v in world.adjList[u] {
+				let factory = world.factories[v]!
+				if factory.owner == Factory.ownerNeutral {
+					unownedReachable.insert(v)
+				}
+			}
+		}
+	}
+
+	mutating func evalBestEdge() {
+		for v in unownedReachable {
+			for u in owned {
+				let distance = world.distance[u][v]
+				if distance < bestDistance {
+					bestDistance = distance
+					bestEdge = (u,v)
+				}
+			}
+		}
+	}
+
+	var possible: Bool {
+		return bestEdge != nil
+	}
+
+	var action: Action {
+		if let (u, v) = bestEdge {
+			return Action.move(u: u, v: v, count: 1)
+		}
+		else {
+			return Action.wait
+		}
+	}
+
+}
+
+struct StrategyFactory {
+
+	let world: World
+
+	func make() -> [StrategyProtocol] {
+		let toNearest = ExpandToNearest(world: world)
+		let waiter = WaitStrategy()
+
+		return [
+			toNearest,
+			waiter,
+		]
+	}
+}
+
+var strategies: [StrategyProtocol] = []
+strategies.append(WaitStrategy())
+
+
+////////////////////////////////////////////////////////////////////////////////
 // MARK: - Main / preinitialization loop
+////////////////////////////////////////////////////////////////////////////////
 
-var factories: [Int: Factory] = [:]
-var adjList: [Int: Int] = [:]
-var distance: [[Int]] = []
-var troops: [Troop] = []
-
-
+var world = World()
+var strategyFactory = StrategyFactory(world: world)
 
 var turn = 0
 // turn 0
 
 func rl() -> String? {
 	if let line = readLine() {
-	//	log(line)
+//		log(line)
 		return line
 	}
 	else {
@@ -252,33 +381,37 @@ func rl() -> String? {
 	}
 }
 
-let factoryCount = Int(rl()!)! // 7 ≤ factoryCount ≤ 15
-let linkCount = Int(rl()!)! // 21 ≤ linkCount ≤ 105
-distance = repeatElement(repeatElement(-1, count: factoryCount).map{$0}, count: factoryCount).map{$0}
+World.factoryCount = Int(rl()!)! // 7 ≤ factoryCount ≤ 15
+World.linkCount = Int(rl()!)! // 21 ≤ linkCount ≤ 105
+world.adjList = [[Int]](repeating: [], count: World.factoryCount)
+world.distance = repeatElement(repeatElement(Int.max/2, count: World.factoryCount).map{$0}, count: World.factoryCount).map{$0}
 
-for _ in 0..<linkCount {
+for _ in 0..<World.linkCount {
 	let arr = rl()!.components(separatedBy: " ").flatMap { Int($0) }
 	guard arr.count == 3 else { fatal("arr=\(arr)") }
 
-	adjList[arr[0]] = arr[1]
-	adjList[arr[1]] = arr[0]
-	distance[arr[0]][arr[1]] = arr[2]
-	distance[arr[1]][arr[0]] = arr[2]
+	world.adjList[arr[0]].append(arr[1])
+	world.adjList[arr[1]].append(arr[0])
+	world.distance[arr[0]][arr[1]] = arr[2]
+	world.distance[arr[1]][arr[0]] = arr[2]
 }
 
+
+////////////////////////////////////////////////////////////////////////////////
 // MARK: Main loop
+////////////////////////////////////////////////////////////////////////////////
 
 func readEntities(n: Int) {
 
-	troops.removeAll(keepingCapacity: true)
+	world.troops.removeAll(keepingCapacity: true)
 	for _ in 0..<n {
 		let line = rl()!
 		let entity = Entity(parseFrom: line)!
 		if let factory = Factory(entity: entity) {
-			factories[factory.id] = factory
+			world.factories[factory.id] = factory
 		}
 		else if let troop = Troop(entity: entity) {
-			troops.append(troop)
+			world.troops.append(troop)
 		}
 		else {
 			log("Unknown entity=\(entity)")
@@ -299,7 +432,13 @@ for turn in 0..<200 {
 		//log("end of line found")
 	}
 
-	print("WAIT")
+	if let strategy = strategyFactory.make().first(where: { $0.possible }) {
+		print(strategy.action.description)
+	}
+	else {
+		log("no strategies available")
+		print(Action.wait.description)
+	}
 }
 
 
