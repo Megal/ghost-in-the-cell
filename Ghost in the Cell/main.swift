@@ -237,7 +237,7 @@ struct Troop {
 	}
 }
 
-class World {
+struct World {
 
 	static var factoryCount = 0 // 7 ≤ factoryCount ≤ 15
 	static var linkCount = 0 // 21 ≤ linkCount ≤ 105
@@ -261,64 +261,84 @@ enum Action {
 			return "MOVE \(u) \(v) \(count)"
 		}
 	}
+
+	static func printableArray(of elements: [Action]) -> String {
+		return elements
+			.map { $0.description }
+			.joined(separator: "; ")
+	}
 }
 
-protocol StrategyProtocol {
-
-	var possible: Bool { get }
-	var action: Action { get }
-}
-
-struct WaitStrategy: StrategyProtocol {
-
-	var possible = true
-	var action = Action.wait
-}
-
-struct ExpandToNearest: StrategyProtocol {
+class StrategyAlgorithmHelper {
 
 	/// world
-	var world: World
-	/// all owned factories
-	var owned: [Int] = []
-	// all unowned factories reachable from owned
-	var unownedReachable: Set<Int> = []
-
-	var bestDistance = 999
-	var bestEdge: Edge? = nil
-
+	let world: World
 	init(world: World) {
 		self.world = world
-
-		markOwned()
-		markUnownedReachable()
-		evalBestEdge()
 	}
 
-	mutating func markOwned() {
+	/// Factories with owner == ownerMe
+	lazy var ownedFactories: [Int] = { return self.getOwnedFactories() }()
+	private func getOwnedFactories() -> [Int] {
+
+		var owned: [Int] = []
 		for (id, factory) in world.factories {
 			if factory.owner == Factory.ownerMe {
 				owned.append(id)
 			}
 		}
+
+		return owned
 	}
 
-	/// Visit all unowned factories adjcent to owned
-	mutating func markUnownedReachable() {
-		for u in owned {
+	/// Factories with neutral owner, but reachable from owned
+	lazy var unownedReachable: Set<Int> = { return self.getUnownedReachable() }()
+	private func getUnownedReachable() -> Set<Int> {
+
+		var reachable: Set<Int> = []
+		for u in self.ownedFactories {
 			for v in world.adjList[u] {
 				let factory = world.factories[v]!
 				if factory.owner == Factory.ownerNeutral {
-					unownedReachable.insert(v)
+					reachable.insert(v)
 				}
 			}
 		}
+
+		return reachable
+	}
+}
+
+protocol StrategyProtocol {
+
+	var possible: Bool { get }
+	var actions: [Action] { get }
+}
+
+struct WaitStrategy: StrategyProtocol {
+
+	var possible = true
+	var actions = [Action.wait]
+}
+
+struct ExpandToNearest: StrategyProtocol {
+
+	/// Algorithm helper
+	let helper: StrategyAlgorithmHelper
+
+	var bestDistance = 999
+	var bestEdge: Edge? = nil
+
+	init(helper: StrategyAlgorithmHelper) {
+		self.helper = helper
+
+		evalBestEdge()
 	}
 
 	mutating func evalBestEdge() {
-		for v in unownedReachable {
-			for u in owned {
-				let distance = world.distance[u][v]
+		for v in helper.unownedReachable {
+			for u in helper.ownedFactories {
+				let distance = helper.world.distance[u][v]
 				if distance < bestDistance {
 					bestDistance = distance
 					bestEdge = (u,v)
@@ -331,26 +351,81 @@ struct ExpandToNearest: StrategyProtocol {
 		return bestEdge != nil
 	}
 
-	var action: Action {
+	var actions: [Action] {
 		if let (u, v) = bestEdge {
-			return Action.move(u: u, v: v, count: 1)
+			return [Action.move(u: u, v: v, count: 1)]
 		}
 		else {
-			return Action.wait
+			return [Action.wait]
 		}
 	}
 
 }
 
+struct ExpandAgressively : StrategyProtocol {
+
+	// Algorithm helper
+	let helper: StrategyAlgorithmHelper
+
+	init(helper: StrategyAlgorithmHelper) {
+		self.helper = helper
+
+		evalActions()
+	}
+
+	var possible: Bool { return self.actions.count > 0 }
+
+	var actions: [Action] = []
+
+	mutating func evalActions() {
+		var visited: Set<Int> = []
+		actions = []
+
+		for u in helper.ownedFactories {
+			guard let factory = helper.world.factories[u] else { log("missing facory with id=\(u)"); continue }
+
+			var remains = factory.cyborgCount
+			let targetFactories = helper.unownedReachable
+				.filter { id in
+					!visited.contains(id)
+				}
+				.flatMap { id in
+					helper.world.factories[id]
+				}
+				.sorted { (a: Factory, b: Factory) -> Bool in
+					return a.productionRate == b.productionRate
+						? helper.world.distance[u][a.id] < helper.world.distance[u][b.id]
+						: a.productionRate > b.productionRate
+				}
+
+			for target in targetFactories {
+				guard remains > 0 else { break }
+
+				if target.cyborgCount < remains {
+					let go = target.cyborgCount > 0
+						? target.cyborgCount
+						: 1
+					actions.append(Action.move(u: u, v: target.id, count: go))
+					remains -= go
+					visited.insert(target.id)
+				}
+			}
+		}
+	}
+}
+
 struct StrategyFactory {
 
-	let world: World
+	/// Algorithm Helper
+	let algorithmHelper: StrategyAlgorithmHelper
 
 	func make() -> [StrategyProtocol] {
-		let toNearest = ExpandToNearest(world: world)
+		let expandAgro = ExpandAgressively(helper: algorithmHelper)
+		let toNearest = ExpandToNearest(helper: algorithmHelper)
 		let waiter = WaitStrategy()
 
 		return [
+			expandAgro,
 			toNearest,
 			waiter,
 		]
@@ -366,7 +441,6 @@ strategies.append(WaitStrategy())
 ////////////////////////////////////////////////////////////////////////////////
 
 var world = World()
-var strategyFactory = StrategyFactory(world: world)
 
 var turn = 0
 // turn 0
@@ -432,8 +506,10 @@ for turn in 0..<200 {
 		//log("end of line found")
 	}
 
+	let algorithmist = StrategyAlgorithmHelper(world: world)
+	var strategyFactory = StrategyFactory(algorithmHelper: algorithmist)
 	if let strategy = strategyFactory.make().first(where: { $0.possible }) {
-		print(strategy.action.description)
+		print(Action.printableArray(of: strategy.actions))
 	}
 	else {
 		log("no strategies available")
