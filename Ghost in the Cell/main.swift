@@ -102,6 +102,16 @@ struct Random {
 
 let random = Random()
 
+/// Swift extenstion
+extension Array  {
+
+	var indexedDictionary: [Int: Element] {
+		var result: [Int: Element] = [:]
+		enumerated().forEach { result[$0.offset] = $0.element }
+		return result
+	}
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -112,6 +122,7 @@ enum EntityType: String {
 
 	case factory = "FACTORY"
 	case troop = "TROOP"
+	case bomb = "BOMB"
 }
 
 struct Entity {
@@ -169,7 +180,7 @@ struct Factory {
 		set { entity.arg1 = newValue }
 	}
 	/// Number of cyborgs in the factory
-	var cyborgCount: Int {
+	var units: Int {
 		get { return entity.arg2 }
 		set { entity.arg2 = newValue }
 	}
@@ -177,6 +188,12 @@ struct Factory {
 	var productionRate: Int {
 		get { return entity.arg3 }
 		set { entity.arg3 = newValue }
+	}
+	/// number of turns before the factory starts producing again 
+	/// (0 means that the factory produces normally)
+	var disabled: Int {
+		get { return entity.arg4 }
+		set { entity.arg4 = newValue }
 	}
 
 	static let ownerMe = 1
@@ -237,6 +254,44 @@ struct Troop {
 	}
 }
 
+/// A kind of Entity, where type == EntityType.troop
+struct Bomb {
+	// TODO: bombs!
+	var entity: Entity
+
+	/// Id
+	var id: Int {
+		get { return entity.id}
+		set { entity.id = newValue }
+	}
+	/// Player that send the bomb: 1 if it is you, -1 if it is your opponent
+	var owner: Int {
+		get { return entity.arg1 }
+		set { entity.arg1 = newValue}
+	}
+	/// Identifier of the factory from where the bomb is launched
+	var source: Int {
+		get { return entity.arg2 }
+		set { entity.arg2 = newValue }
+	}
+	/// Identifier of the targeted factory if it's your bomb, -1 otherwise
+	var destination: Int {
+		get { return entity.arg3 }
+		set { entity.arg3 = newValue}
+	}
+	/// Remaining number of turns before the bomb explodes
+	/// (positive integer) if that's your bomb, -1 otherwise
+	var turnsLeft: Int {
+		get { return entity.arg4 }
+		set { entity.arg4 = newValue }
+	}
+
+	init?(entity: Entity) {
+		guard entity.type == .bomb else { return nil }
+		self.entity = entity
+	}
+}
+
 struct World {
 
 	static var factoryCount = 0 // 7 ≤ factoryCount ≤ 15
@@ -246,12 +301,16 @@ struct World {
 	var adjList: [[Int]] = []
 	var distance: [[Int]] = []
 	var troops: [Troop] = []
+
+	var turn = 0
 }
 
 enum Action {
 
 	case wait
 	case move(u: Int, v: Int, count: Int)
+	case bomb(u: Int, v: Int)
+	case inc(factory: Int)
 
 	var description: String {
 		switch self {
@@ -259,6 +318,10 @@ enum Action {
 			return "WAIT"
 		case .move(let u, let v, let count):
 			return "MOVE \(u) \(v) \(count)"
+		case .bomb(let u, let v):
+			return "BOMB \(u) \(v)"
+		case .inc(let factory):
+			return "INC \(factory)"
 		}
 	}
 
@@ -266,6 +329,136 @@ enum Action {
 		return elements
 			.map { $0.description }
 			.joined(separator: "; ")
+	}
+}
+
+struct PendingOrder {
+
+	/// factory[i] will decrease amount of cyborgs by `value`
+	var usedCyborgs: [Int] = [Int](repeating: 0, count: World.factoryCount)
+
+	/// new troops will be created
+	var newTroops: [Action] = []
+
+	/// factory[i] upgraded `value` times
+	var productionUpgrade: [Int] = [Int](repeating: 0, count: World.factoryCount)
+
+	/// will create a new bomb
+	var newBombs: [Action] = []
+}
+
+extension World {
+
+	/// Game score. owner is 1 for me and -1 for opponent
+	func score(owner: Int) -> Int {
+
+		let inFactories = factories.values
+			.filter { $0.owner == owner }
+			.map { $0.units }
+			.reduce(0, +)
+		let inTroops = troops
+			.filter { $0.owner == owner }
+			.map { $0.unitCount }
+			.reduce(0, +)
+
+		return inFactories + inTroops
+	}
+
+	/// World state on next turn assuming WAIT action from players
+	/// todo: move bombs
+	func nextTurn() -> World {
+
+		// ---
+		// Move troops and bombs
+		// TODO: move bombs
+		// ---
+		var newTroops: [Troop] = []
+		var troopsReadyToFight: [Troop] = []
+		for troop in troops {
+			var newTroop = troop
+			newTroop.turnsLeft = troop.turnsLeft - 1
+
+			if newTroop.turnsLeft > 0 {
+				newTroops.append(newTroop)
+			}
+			else {
+				troopsReadyToFight.append(newTroop)
+			}
+		}
+
+		// ---
+		// Decrease disabled countdown
+		// ---
+		var newFactories: [Factory] = []
+		for factory in factories.values.sorted(by: { $0.id < $1.id }) {
+			var newFactory = factory
+			newFactory.disabled = factory.disabled > 0
+				? factory.disabled - 1
+				: 0
+
+			newFactories.append(newFactory)
+		}
+
+		// ---
+		// Execute orders
+		// Nothing to do here
+		// ---
+
+		// ---
+		// Create new units
+		// ---
+		for (i, factory) in newFactories.enumerated() {
+			if factory.owner != Factory.ownerNeutral {
+				newFactories[i].units += factory.productionRate
+			}
+		}
+
+		// ---
+		// Solve battles
+		// ---
+		for (i, factory) in newFactories.enumerated() {
+			var forces = [-1:0, 1:0]
+			troopsReadyToFight
+				.filter { troop in
+					troop.v == i
+				}
+				.forEach { troop in
+					forces[troop.owner]! += troop.unitCount
+				}
+
+			// Troops fight with each other first
+			let kia = min(forces[-1]!, forces[1]!)
+			forces[-1]! -= kia
+			forces[1]! -= kia
+
+			// Remaining troops fight with factory defences
+			for (owner, units) in forces {
+				if factory.owner == owner { // same owner
+					newFactories[i].units += units
+				}
+				else { // fight with units defenging factory
+					if units > factory.units { // Attacking forces win, change owner
+						newFactories[i].owner = owner
+						newFactories[i].units = units - factory.units
+					}
+					else { // Defences win
+						newFactories[i].units -= units
+					}
+				}
+			}
+		}
+
+		// ---
+		// Solve bombs
+		// TODO: solve bombs
+		// ---
+
+		return World(
+			factories: newFactories.indexedDictionary,
+			adjList: adjList,
+			distance: distance,
+			troops: newTroops,
+			turn: turn+1)
 	}
 }
 
@@ -307,10 +500,33 @@ class StrategyAlgorithmHelper {
 
 		return reachable
 	}
+
+	typealias FactoryWithDistance = (factory: Factory, dist: Int)
+	func closestFactories(to u: Int, owner: Int) -> [FactoryWithDistance] {
+		var unsorted: [FactoryWithDistance] = []
+
+		for v in 0..<World.factoryCount {
+			guard let target = world.factories[v] else { log("expected factory with id=\(v)"); continue }
+			guard target.owner == owner else { continue }
+
+			let dist = world.distance[u][v]
+			if dist < 999 {
+				unsorted.append((factory: target, dist: dist))
+			}
+		}
+
+		return unsorted
+			.sorted{ (lhs, rhs) -> Bool in
+				return lhs.dist == rhs.dist
+					? lhs.factory.id < rhs.factory.id
+					: lhs.dist < rhs.dist
+			}
+	}
 }
 
 protocol StrategyProtocol {
 
+	var name: String { get }
 	var possible: Bool { get }
 	var actions: [Action] { get }
 }
@@ -319,6 +535,7 @@ struct WaitStrategy: StrategyProtocol {
 
 	var possible = true
 	var actions = [Action.wait]
+	var name: String = "WaitStrategy"
 }
 
 struct ExpandToNearest: StrategyProtocol {
@@ -360,6 +577,7 @@ struct ExpandToNearest: StrategyProtocol {
 		}
 	}
 
+	var name: String = "ExpandToNearest"
 }
 
 struct ExpandAgressively : StrategyProtocol {
@@ -377,6 +595,8 @@ struct ExpandAgressively : StrategyProtocol {
 
 	var actions: [Action] = []
 
+	var name: String = "ExpandAgressively"
+
 	mutating func evalActions() {
 		var visited: Set<Int> = []
 		actions = []
@@ -384,26 +604,71 @@ struct ExpandAgressively : StrategyProtocol {
 		for u in helper.ownedFactories {
 			guard let factory = helper.world.factories[u] else { log("missing facory with id=\(u)"); continue }
 
-			var remains = factory.cyborgCount
-			let targetFactories = helper.unownedReachable
-				.filter { id in
-					!visited.contains(id)
+			var remains = factory.units
+			let targetFactories = helper.closestFactories(to: u, owner: Factory.ownerNeutral)
+				.sorted { (lhs, rhs) -> Bool in
+					return lhs.factory.productionRate == rhs.factory.productionRate
+						? lhs.dist < rhs.dist
+						: lhs.factory.productionRate < rhs.factory.productionRate
 				}
-				.flatMap { id in
-					helper.world.factories[id]
-				}
-				.sorted { (a: Factory, b: Factory) -> Bool in
-					return a.productionRate == b.productionRate
-						? helper.world.distance[u][a.id] < helper.world.distance[u][b.id]
-						: a.productionRate > b.productionRate
-				}
+				.map { $0.factory }
 
 			for target in targetFactories {
 				guard remains > 0 else { break }
 
-				if target.cyborgCount < remains {
-					let go = target.cyborgCount > 0
-						? target.cyborgCount
+				if target.units < remains {
+					let go = target.units > 0
+						? target.units
+						: 1
+					actions.append(Action.move(u: u, v: target.id, count: go))
+					remains -= go
+					visited.insert(target.id)
+				}
+			}
+		}
+	}
+}
+
+struct NoRemorse : StrategyProtocol {
+
+	// Algorithm helper
+	let helper: StrategyAlgorithmHelper
+
+	init(helper: StrategyAlgorithmHelper) {
+		self.helper = helper
+
+		evalActions()
+	}
+
+	var possible: Bool { return self.actions.count > 0 }
+
+	var actions: [Action] = []
+
+	var name: String = "NoRemorse"
+
+	mutating func evalActions() {
+		var visited: Set<Int> = []
+		actions = []
+
+		for u in helper.ownedFactories {
+			guard let factory = helper.world.factories[u] else { log("missing facory with id=\(u)"); continue }
+
+			var remains = factory.units
+			let targetFactories = helper.closestFactories(to: u, owner: Factory.ownerOpponent)
+				.sorted { (lhs, rhs) -> Bool in
+					return lhs.factory.productionRate == rhs.factory.productionRate
+						? lhs.dist < rhs.dist
+						: lhs.factory.productionRate < rhs.factory.productionRate
+				}
+
+			/// Calculate more precise count to concuier
+			for (target, dist) in targetFactories {
+				guard remains > 0 else { break }
+
+				let required = target.units + target.productionRate*dist
+				if required < remains {
+					let go = required > 0
+						? required
 						: 1
 					actions.append(Action.move(u: u, v: target.id, count: go))
 					remains -= go
@@ -420,11 +685,13 @@ struct StrategyFactory {
 	let algorithmHelper: StrategyAlgorithmHelper
 
 	func make() -> [StrategyProtocol] {
+		let noRemorse = NoRemorse(helper: algorithmHelper)
 		let expandAgro = ExpandAgressively(helper: algorithmHelper)
 		let toNearest = ExpandToNearest(helper: algorithmHelper)
 		let waiter = WaitStrategy()
 
 		return [
+			noRemorse,
 			expandAgro,
 			toNearest,
 			waiter,
@@ -495,21 +762,39 @@ func readEntities(n: Int) {
 }
 
 
+// TODO: expect score
+var expectedScore = ""
 for turn in 0..<200 {
 
 	if let line = rl(), let entityCount = Int(line) {
 
 		readEntities(n: entityCount)
+		world.turn = turn
+	}
+	else {
+		log("\n--- Stand alone complex @ turn \(turn) ---")
+		world = world.nextTurn()
 	}
 
 	if feof(stdin) != 0 {
 		//log("end of line found")
 	}
 
+	// Log score
+	let scoreFormat: (World) -> String = { return "\($0.score(owner: 1)):\($0.score(owner: -1))" }
+	var score = world.-->scoreFormat
+	if score == expectedScore {
+		log("score=\(score)")
+	}
+	else {
+		log("score mismatch: expected \(expectedScore), got \(score)")
+	}
+	expectedScore = world.nextTurn().-->scoreFormat
+
 	let algorithmist = StrategyAlgorithmHelper(world: world)
 	var strategyFactory = StrategyFactory(algorithmHelper: algorithmist)
 	if let strategy = strategyFactory.make().first(where: { $0.possible }) {
-		print(Action.printableArray(of: strategy.actions))
+		print(Action.printableArray(of: strategy.actions) + ";MSG \(strategy.name)")
 	}
 	else {
 		log("no strategies available")
