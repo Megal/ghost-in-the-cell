@@ -102,7 +102,8 @@ struct Random {
 
 let random = Random()
 
-/// Swift extenstion
+/// MARK: - Array extension
+
 extension Array  {
 
 	var indexedDictionary: [Int: Element] {
@@ -301,6 +302,7 @@ struct World {
 	var adjList: [[Int]] = []
 	var distance: [[Int]] = []
 	var troops: [Troop] = []
+	var bombs: [Bomb] = []
 
 	var turn = 0
 }
@@ -370,7 +372,6 @@ extension World {
 
 		// ---
 		// Move troops and bombs
-		// TODO: move bombs
 		// ---
 		var newTroops: [Troop] = []
 		var troopsReadyToFight: [Troop] = []
@@ -383,6 +384,20 @@ extension World {
 			}
 			else {
 				troopsReadyToFight.append(newTroop)
+			}
+		}
+		var newBombs: [Bomb] = []
+		var bombsReadyToExplode: [Bomb] = []
+		for bomb in bombs {
+			var newBomb = bomb
+			newBomb.turnsLeft = bomb.turnsLeft - 1
+
+			log("bomb has \(bomb.turnsLeft) turns left")
+			if newBomb.turnsLeft > 0 {
+				newBombs.append(newBomb)
+			}
+			else {
+				bombsReadyToExplode.append(newBomb)
 			}
 		}
 
@@ -408,9 +423,10 @@ extension World {
 		// Create new units
 		// ---
 		for (i, factory) in newFactories.enumerated() {
-			if factory.owner != Factory.ownerNeutral {
-				newFactories[i].units += factory.productionRate
-			}
+			guard factory.owner != Factory.ownerNeutral else { continue }
+			guard factory.disabled <= 0 else { continue }
+
+			newFactories[i].units += factory.productionRate
 		}
 
 		// ---
@@ -450,15 +466,115 @@ extension World {
 
 		// ---
 		// Solve bombs
-		// TODO: solve bombs
 		// ---
+		for bomb in bombsReadyToExplode {
+			let factory = newFactories[bomb.destination]
+			let damage = min(factory.units, max(10, factory.units/2))
+			newFactories[bomb.destination].units = factory.units - damage
+			newFactories[bomb.destination].disabled = 5
+		}
 
 		return World(
 			factories: newFactories.indexedDictionary,
 			adjList: adjList,
 			distance: distance,
 			troops: newTroops,
+			bombs: newBombs,
 			turn: turn+1)
+	}
+}
+
+struct BombAdviser {
+
+	struct LaunchRecord {
+		var bomb: Bomb
+		var resolvedBomb: Bomb
+		let world: World
+	}
+
+	var registeredLaunches: [Int:LaunchRecord] = [:]
+
+	mutating func guessTarget(for bomb: Bomb, in world: World) -> Bomb {
+
+		var bomb = updateLaunchResolvedBomb(for: bomb, in: world)
+		let turnsFromLaunch = world.turn - registeredLaunches[bomb.id]!.world.turn
+		bomb.turnsLeft -= turnsFromLaunch
+
+		return bomb
+	}
+
+	/// Try to guess hidden parameters
+	mutating func updateLaunchResolvedBomb(for bomb: Bomb, in world: World) -> Bomb {
+
+		if let launch = registeredLaunches[bomb.id] {
+			let turnsFromLaunch = world.turn - launch.world.turn
+			if turnsFromLaunch >= launch.resolvedBomb.turnsLeft {
+				log("Wrong expectation for bomb: \(bomb)")
+				let record = resolve(bomb: launch.bomb, world: launch.world, minDuration: turnsFromLaunch + 1)
+
+				registeredLaunches[record.resolvedBomb.id] = record
+				return record.resolvedBomb
+			}
+			else {
+				return launch.resolvedBomb
+			}
+		}
+		else {
+			let record = resolve(bomb: bomb, world: world, minDuration: 1)
+
+			registeredLaunches[bomb.id] = record
+			return record.resolvedBomb
+		}
+	}
+
+	func resolve(bomb: Bomb, world: World, minDuration: Int) -> LaunchRecord {
+
+		let target = world.factories.values
+			.filter { target in
+				target.id != bomb.source
+			}
+			.filter { target in
+				world.distance[bomb.source][target.id] >= minDuration
+			}
+			.sorted{ a, b in
+				let distA = world.distance[bomb.source][a.id]
+				let distB = world.distance[bomb.source][b.id]
+
+				// In search prefer:
+				// 1. owner is me
+				// 2. more production rate
+				// 3. more units
+				// 4. less distance
+				if a.owner != b.owner {
+					return a.owner > b.owner
+				}
+				else if a.productionRate != b.productionRate {
+					return a.productionRate > b.productionRate
+				}
+				else if a.units != b.units {
+					return a.units > b.units
+				}
+				else {
+					return distA < distB
+				}
+			}
+			.first
+
+		if let target = target {
+			var resolved = bomb
+			resolved.destination = target.id
+			resolved.turnsLeft = world.distance[bomb.source][target.id]
+
+			return LaunchRecord(bomb: bomb, resolvedBomb: resolved, world: world)
+		}
+		else {
+			log("!!! Cannot find suitable target for bomb=\(bomb)! ")
+			var resolved = bomb
+			resolved.destination = 0
+			resolved.turnsLeft = minDuration
+
+			return LaunchRecord(bomb: bomb, resolvedBomb: resolved, world: world)
+		}
 	}
 }
 
@@ -708,6 +824,7 @@ strategies.append(WaitStrategy())
 ////////////////////////////////////////////////////////////////////////////////
 
 var world = World()
+var bombAdviser = BombAdviser()
 
 var turn = 0
 // turn 0
@@ -745,6 +862,8 @@ for _ in 0..<World.linkCount {
 func readEntities(n: Int) {
 
 	world.troops.removeAll(keepingCapacity: true)
+	world.bombs.removeAll(keepingCapacity: true)
+
 	for _ in 0..<n {
 		let line = rl()!
 		let entity = Entity(parseFrom: line)!
@@ -753,6 +872,15 @@ func readEntities(n: Int) {
 		}
 		else if let troop = Troop(entity: entity) {
 			world.troops.append(troop)
+		}
+		else if let bomb = Bomb(entity: entity) {
+			if bomb.owner == Factory.ownerMe {
+				world.bombs.append(bomb)
+			}
+			else {
+				let resolved = bombAdviser.guessTarget(for: bomb, in: world)
+				world.bombs.append(resolved)
+			}
 		}
 		else {
 			log("Unknown entity=\(entity)")
