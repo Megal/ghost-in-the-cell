@@ -159,6 +159,19 @@ extension Entity {
 	}
 }
 
+extension Entity {
+
+	/// Unique id incremented by one each time `createUnique` called
+	static var uuid = 1000
+
+	static func createUnique(type: EntityType) -> Entity {
+
+		let id = Entity.uuid; Entity.uuid += 1
+
+		return Entity(id: id, type: type, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0)
+	}
+}
+
 /// A kind of Entity, where type == EntityType.factory
 struct Factory {
 
@@ -293,6 +306,13 @@ struct Bomb {
 	}
 }
 
+extension Troop: CustomStringConvertible
+{
+	var description: String {
+		return "Troop<\(id)(\(owner))> (\(unitCount)@T-\(turnsLeft): \(u)->\(v))"
+	}
+}
+
 struct World {
 
 	static var factoryCount = 0 // 7 ≤ factoryCount ≤ 15
@@ -334,19 +354,25 @@ enum Action {
 	}
 }
 
-struct PendingOrder {
+extension Action {
+
+	var executeOrder: Int {
+		switch self {
+			case .bomb: return 10
+			case .move: return 20
+			case .inc: return 30
+			case .wait: return 100
+		}
+	}
+}
+
+struct PendingOrders {
 
 	/// factory[i] will decrease amount of cyborgs by `value`
 	var usedCyborgs: [Int] = [Int](repeating: 0, count: World.factoryCount)
 
-	/// new troops will be created
-	var newTroops: [Action] = []
-
-	/// factory[i] upgraded `value` times
-	var productionUpgrade: [Int] = [Int](repeating: 0, count: World.factoryCount)
-
-	/// will create a new bomb
-	var newBombs: [Action] = []
+	/// Move troops, use bombs, increase production
+	var actions: [Action] = []
 }
 
 extension World {
@@ -367,8 +393,7 @@ extension World {
 	}
 
 	/// World state on next turn assuming WAIT action from players
-	/// todo: move bombs
-	func nextTurn() -> World {
+	func nextTurn(with orders: PendingOrders? = nil) -> World {
 
 		// ---
 		// Move troops and bombs
@@ -416,8 +441,79 @@ extension World {
 
 		// ---
 		// Execute orders
-		// Nothing to do here
+		// TODO: owner is only me?
 		// ---
+		if let orders = orders {
+			// Send bombs
+			let actions = orders.actions.sorted { $0.executeOrder < $1.executeOrder }
+			var veryNewTroops: [Troop] = []
+			var veryNewBombs: [Bomb] = []
+
+			for action in actions {
+				switch action {
+					case .bomb(let u, let v):
+						if veryNewBombs.first(where: { bomb in bomb.source == u && bomb.destination == v }) == nil {
+							/// Skip bombs with same source and destination
+							let baseEntity = Entity.createUnique(type: .bomb)
+							guard var bomb = Bomb(entity: baseEntity) else { log("Cannot create bomb with \(action)"); continue }
+
+							bomb.owner = Factory.ownerMe
+							bomb.source = u
+							bomb.destination = v
+							bomb.turnsLeft = distance[u][v]
+							veryNewBombs.append(bomb)
+						} else {
+							log("Cannot add bomb(already have a bomb here) with \(action)")
+						}
+
+					case .move(let u, let v, let count):
+						let unitsToMove = min(count, newFactories[u].units)
+						guard unitsToMove > 0 else {
+							log("Nothing to move with \(action)")
+							continue
+						}
+						guard nil == veryNewBombs.first(where: { bomb in bomb.source == u && bomb.destination == v }) else {
+							log("Will not send troops (there is also a bomb) when parsing \(action)")
+							continue
+						}
+						if let i = veryNewTroops.index(where: { troop in troop.u == u && troop.v == v }) {
+							log("Troop already exists! adding to it  with \(action)")
+							veryNewTroops[i].unitCount += unitsToMove
+							newFactories[u].units -= unitsToMove
+						}
+						else {
+							let baseEntity = Entity.createUnique(type: .troop)
+							guard var troop = Troop(entity: baseEntity) else { log("Cannot create troop with \(action)"); continue}
+							troop.owner = Factory.ownerMe
+							troop.u = u
+							troop.v = v
+							troop.unitCount = unitsToMove
+							troop.turnsLeft = distance[u][v]
+							newFactories[u].units -= unitsToMove
+
+							veryNewTroops.append(troop)
+						}
+
+					case .inc(let factory):
+						if newFactories[factory].productionRate < 3 && newFactories[factory].units >= 10 {
+							newFactories[factory].productionRate += 1
+							newFactories[factory].units -= 10
+						}
+						else {
+							log("cannot upgrade factory \(factory)")
+						}
+
+					case .wait:
+						continue
+				}
+			}
+
+			log("newTroops before: \(newTroops)")
+			newBombs.append(contentsOf: veryNewBombs)
+			newTroops.append(contentsOf: veryNewTroops)
+			log("newTroops after: \(newTroops)")
+		}
+
 
 		// ---
 		// Create new units
@@ -917,15 +1013,19 @@ for turn in 0..<200 {
 	else {
 		log("score mismatch: expected \(expectedScore), got \(score)")
 	}
-	expectedScore = world.nextTurn().-->scoreFormat
 
 	let algorithmist = StrategyAlgorithmHelper(world: world)
 	var strategyFactory = StrategyFactory(algorithmHelper: algorithmist)
 	if let strategy = strategyFactory.make().first(where: { $0.possible }) {
+		let orders = PendingOrders(usedCyborgs: [], actions: strategy.actions)
+		expectedScore = world.nextTurn(with: orders).-->scoreFormat
+
 		print(Action.printableArray(of: strategy.actions) + ";MSG \(strategy.name)")
 	}
 	else {
 		log("no strategies available")
+		expectedScore = world.nextTurn().-->scoreFormat
+
 		print(Action.wait.description)
 	}
 }
