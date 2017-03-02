@@ -17,7 +17,14 @@ public struct StderrOutputStream: TextOutputStream {
 	public mutating func write(_ string: String) { fputs(string, stderr) }
 }
 public var errStream = StderrOutputStream()
-func log(_ message: String) {	print(message, to: &errStream) }
+
+var loggingEnabled = true
+func log(_ message: String) {
+
+	if loggingEnabled {
+		print(message, to: &errStream)
+	}
+}
 func fatal(_ message: String = "Fatal error!") -> Never  { log(message); abort() }
 
 // Local Tests
@@ -508,10 +515,8 @@ extension World {
 				}
 			}
 
-			log("newTroops before: \(newTroops)")
 			newBombs.append(contentsOf: veryNewBombs)
 			newTroops.append(contentsOf: veryNewTroops)
-			log("newTroops after: \(newTroops)")
 		}
 
 
@@ -734,160 +739,281 @@ class StrategyAlgorithmHelper {
 					: lhs.dist < rhs.dist
 			}
 	}
+
+	/// Factories with owner == ownerMe, sorted by id
+	lazy var myFactories: [Factory] = { return self.getMyFactories() }()
+	private func getMyFactories() -> [Factory] {
+
+		return world.factories.values
+			.filter { factory in
+				factory.owner == Factory.ownerMe
+			}
+			.sorted { a, b in
+				a.id < b.id
+			}
+	}
+
+	typealias FactoryEdgeEx = (from: Factory, to: Factory, dist: Int)
+	/// Sorting order by less distacne, source id, target id
+	lazy var myEdgesEx: [FactoryEdgeEx] = { return self.getMyExtendedEdges() }()
+	private func getMyExtendedEdges() -> [FactoryEdgeEx] {
+
+		var extendedEdges: [FactoryEdgeEx] = []
+
+		for factory in myFactories {
+			for v in 0..<World.factoryCount {
+				let dist = world.distance[factory.id][v]
+				guard dist < 999 else { continue }
+
+				extendedEdges.append((from: factory, to: world.factories[v]!, dist: dist))
+			}
+		}
+
+		// sort edges
+		extendedEdges
+			.sort { a, b in
+				if a.dist != b .dist {
+					return a.dist < b.dist
+				}
+				else if a.from.id != b.from.id {
+					return a.from.id < b.from.id
+				}
+				else {
+					return a.to.id < b.to.id
+				}
+			}
+
+		return extendedEdges
+	}
+
+	/// Binary search for maximum of one-dimension function `calc` on closed interval of Int arguments
+	func binarySearch(_ closedRange: CountableClosedRange<Int>, calc: (Int) -> Int) -> Int {
+		guard closedRange.count > 0 else { return 0 }
+
+		var l = closedRange.lowerBound, r = closedRange.upperBound
+		var valueL = calc(l)
+		var valueR = calc(r)
+
+		var mid = l
+		var valueM = valueL
+		while l + 1 < r {
+			mid = (l + r) / 2
+			valueM = calc(mid)
+
+			if valueL >= valueR {
+				r = mid
+				valueR = valueM
+			}
+			else {
+				l = mid
+				valueL = valueM
+			}
+		}
+
+		let valueMax = [valueL, valueM, valueR].max()!
+		if valueL == valueMax {
+			return l
+		}
+		else if valueM == valueMax {
+			return mid
+		}
+		else {
+			return r
+		}
+	}
+
+	func score(after turns: Int, orders: PendingOrders, newAction: Action) -> Int {
+
+		guard turns > 1 else { log("Cannot score for \(turns) turns."); return 0 }
+		var u = 0
+		var units = 0
+		switch newAction {
+			case .move(let lu, _, let lcount):
+				u = lu
+				units = lcount
+
+			case .wait:
+				break
+
+			default:
+				log("Unexpected action \(newAction)")
+				return 0
+		}
+
+		var orderCopy = orders
+		if( units > 0 ) {
+			orderCopy.actions.append(newAction)
+			orderCopy.usedCyborgs[u] += units
+		}
+
+		var evolvingWorld = world.nextTurn(with: orderCopy)
+		autoreleasepool {
+			for _ in 1...turns {
+				evolvingWorld = evolvingWorld.nextTurn()
+			}
+		}
+
+		return evolvingWorld.score(owner: Factory.ownerMe) - evolvingWorld.score(owner: Factory.ownerOpponent)
+	}
 }
 
-protocol StrategyProtocol {
+protocol ChainableStrategyProtocol {
 
 	var name: String { get }
-	var possible: Bool { get }
-	var actions: [Action] { get }
+	var input: PendingOrders { get set }
+	var output: PendingOrders { get }
 }
 
-struct WaitStrategy: StrategyProtocol {
+struct WaitStrategy: ChainableStrategyProtocol {
 
-	var possible = true
-	var actions = [Action.wait]
+	var input = PendingOrders()
+	var output: PendingOrders {
+		var output = input
+		output.actions.append(.wait)
+
+		return output
+	}
 	var name: String = "WaitStrategy"
 }
 
-struct ExpandToNearest: StrategyProtocol {
+struct BombStrategy: ChainableStrategyProtocol {
+
+	static var bombsLeft = 2
 
 	/// Algorithm helper
 	let helper: StrategyAlgorithmHelper
 
-	var bestDistance = 999
-	var bestEdge: Edge? = nil
+	/// Filter targets that has not enough production
+	var minProduction: Int
 
-	init(helper: StrategyAlgorithmHelper) {
-		self.helper = helper
+	/// Filter targets that have not enough units
+	var minUnits: Int
 
-		evalBestEdge()
+	/// Filter targets that are not close enough
+	var maxDistance: Int
+
+	var name: String {
+		return "BombStrategy p>=\(minProduction) u>=\(minUnits) d<=\(maxDistance)"
 	}
 
-	mutating func evalBestEdge() {
-		for v in helper.unownedReachable {
-			for u in helper.ownedFactories {
-				let distance = helper.world.distance[u][v]
-				if distance < bestDistance {
-					bestDistance = distance
-					bestEdge = (u,v)
+	init(helper: StrategyAlgorithmHelper, minProduction: Int = 0, minUnits: Int = 0, maxDistance: Int = 99, input: PendingOrders = PendingOrders()) {
+		self.helper = helper
+		self.minProduction = minProduction
+		self.minUnits = minUnits
+		self.maxDistance = maxDistance
+		self.input = input
+	}
+
+	var input: PendingOrders
+
+	var output: PendingOrders {
+		var output = input
+
+		// TODO: add bombs
+		for edgeEx in helper.myEdgesEx {
+			guard edgeEx.to.productionRate >= minProduction else { continue }
+			guard edgeEx.to.units >= minUnits else { continue }
+			guard edgeEx.dist <= maxDistance else { continue }
+
+			let u = edgeEx.from.id
+			let v = edgeEx.to.id
+
+			let samePathAction = output.actions.first { action in
+				switch action {
+					case .bomb(let bu, let bv):
+						return bu == u && v == bv
+
+					case .move(let mu, let mv, _):
+						return mu == u && mv == v
+
+					default:
+						return false
+
 				}
 			}
+			guard samePathAction == nil else { continue }
+
+			output.actions.append(.bomb(u: edgeEx.from.id, v: edgeEx.to.id))
 		}
-	}
 
-	var possible: Bool {
-		return bestEdge != nil
-	}
-
-	var actions: [Action] {
-		if let (u, v) = bestEdge {
-			return [Action.move(u: u, v: v, count: 1)]
-		}
-		else {
-			return [Action.wait]
-		}
-	}
-
-	var name: String = "ExpandToNearest"
-}
-
-struct ExpandAgressively : StrategyProtocol {
-
-	// Algorithm helper
-	let helper: StrategyAlgorithmHelper
-
-	init(helper: StrategyAlgorithmHelper) {
-		self.helper = helper
-
-		evalActions()
-	}
-
-	var possible: Bool { return self.actions.count > 0 }
-
-	var actions: [Action] = []
-
-	var name: String = "ExpandAgressively"
-
-	mutating func evalActions() {
-		var visited: Set<Int> = []
-		actions = []
-
-		for u in helper.ownedFactories {
-			guard let factory = helper.world.factories[u] else { log("missing facory with id=\(u)"); continue }
-
-			var remains = factory.units
-			let targetFactories = helper.closestFactories(to: u, owner: Factory.ownerNeutral)
-				.sorted { (lhs, rhs) -> Bool in
-					return lhs.factory.productionRate == rhs.factory.productionRate
-						? lhs.dist < rhs.dist
-						: lhs.factory.productionRate < rhs.factory.productionRate
-				}
-				.map { $0.factory }
-
-			for target in targetFactories {
-				guard remains > 0 else { break }
-
-				if target.units < remains {
-					let go = target.units > 0
-						? target.units
-						: 1
-					actions.append(Action.move(u: u, v: target.id, count: go))
-					remains -= go
-					visited.insert(target.id)
-				}
-			}
-		}
+		return output
 	}
 }
 
-struct NoRemorse : StrategyProtocol {
+struct IncEverywhere: ChainableStrategyProtocol {
 
-	// Algorithm helper
+	/// Algorithm helper
 	let helper: StrategyAlgorithmHelper
 
-	init(helper: StrategyAlgorithmHelper) {
+	init(helper: StrategyAlgorithmHelper, input: PendingOrders = PendingOrders()) {
 		self.helper = helper
-
-		evalActions()
+		self.input = input
 	}
 
-	var possible: Bool { return self.actions.count > 0 }
+	var name: String { return "IncEverywhere" }
 
-	var actions: [Action] = []
+	var input: PendingOrders
 
-	var name: String = "NoRemorse"
+	var output: PendingOrders {
 
-	mutating func evalActions() {
-		var visited: Set<Int> = []
-		actions = []
+		var output = input
 
-		for u in helper.ownedFactories {
-			guard let factory = helper.world.factories[u] else { log("missing facory with id=\(u)"); continue }
+		for factory in helper.myFactories {
+			let fid = factory.id
+			var unitsAvailable = factory.units - input.usedCyborgs[fid]
+			var productionRate = factory.productionRate
 
-			var remains = factory.units
-			let targetFactories = helper.closestFactories(to: u, owner: Factory.ownerOpponent)
-				.sorted { (lhs, rhs) -> Bool in
-					return lhs.factory.productionRate == rhs.factory.productionRate
-						? lhs.dist < rhs.dist
-						: lhs.factory.productionRate < rhs.factory.productionRate
-				}
-
-			/// Calculate more precise count to concuier
-			for (target, dist) in targetFactories {
-				guard remains > 0 else { break }
-
-				let required = target.units + target.productionRate*dist
-				if required < remains {
-					let go = required > 0
-						? required
-						: 1
-					actions.append(Action.move(u: u, v: target.id, count: go))
-					remains -= go
-					visited.insert(target.id)
-				}
+			while unitsAvailable >= 10 && productionRate < 3 {
+				output.actions.append(.inc(factory: fid))
+				unitsAvailable -= 10
+				output.usedCyborgs[fid] += 10
+				productionRate += 1
 			}
 		}
+
+		return output
+	}
+}
+
+struct SmartMovement: ChainableStrategyProtocol {
+
+	/// Algorithm helper
+	let helper: StrategyAlgorithmHelper
+
+	init(helper: StrategyAlgorithmHelper, input: PendingOrders = PendingOrders()) {
+		self.helper = helper
+		self.input = input
+	}
+
+	var name: String { return "SmartMovement" }
+
+	var input: PendingOrders
+
+	var output: PendingOrders {
+
+		var output = input
+
+		for edgeEx in helper.myEdgesEx {
+			let u = edgeEx.from.id
+			let v = edgeEx.to.id
+
+			let availableUnits = helper.world.factories[u]!.units - output.usedCyborgs[u]
+			let best = helper
+				.binarySearch(0...availableUnits) { units in
+					let loggingWas = loggingEnabled
+					loggingEnabled = false
+					defer { loggingEnabled = loggingWas }
+
+					return helper.score(after: 20, orders: output, newAction: Action.move(u: u, v: v, count: units))
+				}
+
+			if best > 0 {
+				output.actions.append(.move(u: u, v: v, count: best))
+				output.usedCyborgs[u] += best
+			}
+		}
+
+		return output
 	}
 }
 
@@ -896,23 +1022,28 @@ struct StrategyFactory {
 	/// Algorithm Helper
 	let algorithmHelper: StrategyAlgorithmHelper
 
-	func make() -> [StrategyProtocol] {
-		let noRemorse = NoRemorse(helper: algorithmHelper)
-		let expandAgro = ExpandAgressively(helper: algorithmHelper)
-		let toNearest = ExpandToNearest(helper: algorithmHelper)
-		let waiter = WaitStrategy()
+	typealias ChainedStrategyOrders = (strategyNames: [String], orders: PendingOrders)
+	func makeChain() -> ChainedStrategyOrders {
 
-		return [
-			noRemorse,
-			expandAgro,
-			toNearest,
-			waiter,
+		let bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 10, maxDistance: 5)
+		let incEverywhere = IncEverywhere(helper: algorithmHelper)
+		let smart = SmartMovement(helper: algorithmHelper)
+
+		let chain: [ChainableStrategyProtocol] = [
+			bombStrategy,
+			incEverywhere,
+			smart,
 		]
+
+		var orders = PendingOrders()
+		for var strategy in chain {
+			strategy.input = orders
+			orders = strategy.output
+		}
+
+		return (strategyNames: chain.map{$0.name}, orders: orders)
 	}
 }
-
-var strategies: [StrategyProtocol] = []
-strategies.append(WaitStrategy())
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1016,11 +1147,11 @@ for turn in 0..<200 {
 
 	let algorithmist = StrategyAlgorithmHelper(world: world)
 	var strategyFactory = StrategyFactory(algorithmHelper: algorithmist)
-	if let strategy = strategyFactory.make().first(where: { $0.possible }) {
-		let orders = PendingOrders(usedCyborgs: [], actions: strategy.actions)
-		expectedScore = world.nextTurn(with: orders).-->scoreFormat
 
-		print(Action.printableArray(of: strategy.actions) + ";MSG \(strategy.name)")
+	if case let chained = strategyFactory.makeChain(), chained.orders.actions.count > 0 {
+		expectedScore = world.nextTurn(with: chained.orders).-->scoreFormat
+
+		print(Action.printableArray(of: chained.orders.actions) + ";MSG \(chained.strategyNames.joined(separator: "-&>"))")
 	}
 	else {
 		log("no strategies available")
