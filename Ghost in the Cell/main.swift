@@ -177,13 +177,13 @@ enum EntityType: CustomStringConvertible {
 
 struct Entity {
 
-	var id: Int
+	var id: Int16
 	var type: EntityType
-	var arg1: Int
-	var arg2: Int
-	var arg3: Int
-	var arg4: Int
-	var arg5: Int
+	var arg1: Int16
+	var arg2: Int16
+	var arg3: Int16
+	var arg4: Int16
+	var arg5: Int16
 }
 
 extension Entity {
@@ -192,9 +192,9 @@ extension Entity {
 		let input = line.components(separatedBy: " ").flatMap { String($0) }
 		guard input.count == 7 else { return nil }
 
-		guard let id = Int(input[0]) else { return nil }
+		guard let id = Int16(input[0]) else { return nil }
 		guard let type = EntityType(input[1]) else { return nil }
-		let args = input.suffix(from: 2).flatMap { Int($0) }
+		let args = input.suffix(from: 2).flatMap { Int16($0) }
 		guard args.count == 5 else { return nil }
 
 		self.init(
@@ -211,7 +211,7 @@ extension Entity {
 extension Entity {
 
 	/// Unique id incremented by one each time `createUnique` called
-	static var uuid = 1000
+	static var uuid: Int16 = 1000
 
 	static func createUnique(type: EntityType) -> Entity {
 
@@ -229,8 +229,8 @@ struct Factory {
 
 	/// Id
 	var id: Int {
-		get { return entity.id }
-		set { entity.id = newValue }
+		get { return Int(entity.id) }
+		set { entity.id = Int16(newValue) }
 	}
 	/// Type, must be EntityType.factory
 	var type: EntityType {
@@ -239,24 +239,24 @@ struct Factory {
 	}
 	/// Player that owns the factory: 1 for you, -1 for your opponent and 0 if neutral
 	var owner: Int {
-		get { return entity.arg1 }
-		set { entity.arg1 = newValue }
+		get { return Int(entity.arg1) }
+		set { entity.arg1 = Int16(newValue) }
 	}
 	/// Number of cyborgs in the factory
 	var units: Int {
-		get { return entity.arg2 }
-		set { entity.arg2 = newValue }
+		get { return Int(entity.arg2) }
+		set { entity.arg2 = Int16(newValue) }
 	}
 	/// Factory production (between 0 and 3)
 	var productionRate: Int {
-		get { return entity.arg3 }
-		set { entity.arg3 = newValue }
+		get { return Int(entity.arg3) }
+		set { entity.arg3 = Int16(newValue) }
 	}
 	/// number of turns before the factory starts producing again 
 	/// (0 means that the factory produces normally)
 	var disabled: Int {
-		get { return entity.arg4 }
-		set { entity.arg4 = newValue }
+		get { return Int(entity.arg4) }
+		set { entity.arg4 = Int16(newValue) }
 	}
 
 	static let ownerMe = 1
@@ -277,8 +277,8 @@ struct Troop {
 
 	/// Id
 	var id: Int {
-		get { return entity.id }
-		set { entity.id = newValue }
+		get { return Int(entity.id) }
+		set { entity.id = Int16(newValue) }
 	}
 	/// Type, must be EntityType.troop
 	var type: EntityType {
@@ -287,28 +287,28 @@ struct Troop {
 	}
 	/// Player that owns the troop: 1 for you or -1 for your opponent
 	var owner: Int {
-		get { return entity.arg1 }
-		set { entity.arg1 = newValue }
+		get { return Int(entity.arg1) }
+		set { entity.arg1 = Int16(newValue) }
 	}
 	/// Identifier of the factory from where the troop leaves
 	var u: Int {
-		get { return entity.arg2 }
-		set { entity.arg2 = newValue}
+		get { return Int(entity.arg2) }
+		set { entity.arg2 = Int16(newValue) }
 	}
 	/// Identifier of the factory targeted by the troop
 	var v: Int {
-		get { return entity.arg3 }
-		set { entity.arg3 = newValue }
+		get { return Int(entity.arg3) }
+		set { entity.arg3 = Int16(newValue) }
 	}
 	/// Number of cyborgs in the troop (positive integer)
 	var unitCount: Int {
-		get { return entity.arg4 }
-		set { entity.arg4 = newValue }
+		get { return Int(entity.arg4) }
+		set { entity.arg4 = Int16(newValue) }
 	}
 	/// remaining number of turns before the troop arrives (positive integer)
 	var turnsLeft: Int {
-		get { return entity.arg5 }
-		set { entity.arg5 = newValue }
+		get { return Int(entity.arg5) }
+		set { entity.arg5 = Int16(newValue) }
 	}
 
 	init?(entity: Entity) {
@@ -324,29 +324,29 @@ struct Bomb {
 
 	/// Id
 	var id: Int {
-		get { return entity.id}
-		set { entity.id = newValue }
+		get { return Int(entity.id) }
+		set { entity.id = Int16(newValue) }
 	}
 	/// Player that send the bomb: 1 if it is you, -1 if it is your opponent
 	var owner: Int {
-		get { return entity.arg1 }
-		set { entity.arg1 = newValue}
+		get { return Int(entity.arg1) }
+		set { entity.arg1 = Int16(newValue) }
 	}
 	/// Identifier of the factory from where the bomb is launched
 	var source: Int {
-		get { return entity.arg2 }
-		set { entity.arg2 = newValue }
+		get { return Int(entity.arg2) }
+		set { entity.arg2 = Int16(newValue) }
 	}
 	/// Identifier of the targeted factory if it's your bomb, -1 otherwise
 	var destination: Int {
-		get { return entity.arg3 }
-		set { entity.arg3 = newValue}
+		get { return Int(entity.arg3) }
+		set { entity.arg3 = Int16(newValue) }
 	}
 	/// Remaining number of turns before the bomb explodes
 	/// (positive integer) if that's your bomb, -1 otherwise
 	var turnsLeft: Int {
-		get { return entity.arg4 }
-		set { entity.arg4 = newValue }
+		get { return Int(entity.arg4) }
+		set { entity.arg4 = Int16(newValue) }
 	}
 
 	init?(entity: Entity) {
@@ -364,12 +364,14 @@ extension Troop: CustomStringConvertible
 
 struct World {
 
+	typealias `Self` = World
+
 	static var factoryCount = 0 // 7 ≤ factoryCount ≤ 15
 	static var linkCount = 0 // 21 ≤ linkCount ≤ 105
+	static var adjList: [[Int]] = []
+	static var distance: [[Int]] = []
 
-	var factories: [Int: Factory] = [:]
-	var adjList: [[Int]] = []
-	var distance: [[Int]] = []
+	var factories: [Factory] = []
 	var troops: [Troop] = []
 	var bombs: [Bomb] = []
 
@@ -429,7 +431,7 @@ extension World {
 	/// Game score. owner is 1 for me and -1 for opponent
 	func score(owner: Int) -> Int {
 
-		let inFactories = factories.values
+		let inFactories = factories
 			.filter { $0.owner == owner }
 			.map { $0.units }
 			.reduce(0, +)
@@ -492,7 +494,7 @@ extension World {
 		// Decrease disabled countdown
 		// ---
 		var newFactories: [Factory] = []
-		for factory in factories.values.sorted(by: { $0.id < $1.id }) {
+		for factory in factories {
 			var newFactory = factory
 			newFactory.disabled = factory.disabled > 0
 				? factory.disabled - 1
@@ -522,7 +524,7 @@ extension World {
 							bomb.owner = Factory.ownerMe
 							bomb.source = u
 							bomb.destination = v
-							bomb.turnsLeft = distance[u][v]
+							bomb.turnsLeft = World.distance[u][v]
 							veryNewBombs.append(bomb)
 						} else {
 							log("Cannot add bomb(already have a bomb here) with \(action)")
@@ -550,7 +552,7 @@ extension World {
 							troop.u = u
 							troop.v = v
 							troop.unitCount = unitsToMove
-							troop.turnsLeft = distance[u][v]
+							troop.turnsLeft = World.distance[u][v]
 							newFactories[u].units -= unitsToMove
 
 							veryNewTroops.append(troop)
@@ -647,9 +649,7 @@ extension World {
 		}
 
 		return World(
-			factories: newFactories.indexedDictionary,
-			adjList: adjList,
-			distance: distance,
+			factories: newFactories,
 			troops: newTroops,
 			bombs: newBombs,
 			turn: turn+1)
@@ -701,16 +701,16 @@ struct BombAdviser {
 
 	func resolve(bomb: Bomb, world: World, minDuration: Int) -> LaunchRecord {
 
-		let target = world.factories.values
+		let target = world.factories
 			.filter { target in
 				target.id != bomb.source
 			}
 			.filter { target in
-				world.distance[bomb.source][target.id] >= minDuration
+				World.distance[bomb.source][target.id] >= minDuration
 			}
 			.sorted{ a, b in
-				let distA = world.distance[bomb.source][a.id]
-				let distB = world.distance[bomb.source][b.id]
+				let distA = World.distance[bomb.source][a.id]
+				let distB = World.distance[bomb.source][b.id]
 
 				// In search prefer:
 				// 1. owner is me
@@ -735,7 +735,7 @@ struct BombAdviser {
 		if let target = target {
 			var resolved = bomb
 			resolved.destination = target.id
-			resolved.turnsLeft = world.distance[bomb.source][target.id]
+			resolved.turnsLeft = World.distance[bomb.source][target.id]
 
 			return LaunchRecord(bomb: bomb, resolvedBomb: resolved, world: world)
 		}
@@ -763,9 +763,9 @@ class StrategyAlgorithmHelper {
 	private func getOwnedFactories() -> [Int] {
 
 		var owned: [Int] = []
-		for (id, factory) in world.factories {
+		for factory in world.factories {
 			if factory.owner == Factory.ownerMe {
-				owned.append(id)
+				owned.append(factory.id)
 			}
 		}
 
@@ -778,8 +778,8 @@ class StrategyAlgorithmHelper {
 
 		var reachable: Set<Int> = []
 		for u in self.ownedFactories {
-			for v in world.adjList[u] {
-				let factory = world.factories[v]!
+			for v in World.adjList[u] {
+				let factory = world.factories[v]
 				if factory.owner == Factory.ownerNeutral {
 					reachable.insert(v)
 				}
@@ -794,10 +794,10 @@ class StrategyAlgorithmHelper {
 		var unsorted: [FactoryWithDistance] = []
 
 		for v in 0..<World.factoryCount {
-			guard let target = world.factories[v] else { log("expected factory with id=\(v)"); continue }
+			let target = world.factories[v]
 			guard target.owner == owner else { continue }
 
-			let dist = world.distance[u][v]
+			let dist = World.distance[u][v]
 			if dist < 999 {
 				unsorted.append((factory: target, dist: dist))
 			}
@@ -815,7 +815,7 @@ class StrategyAlgorithmHelper {
 	lazy var myFactories: [Factory] = { return self.getMyFactories() }()
 	private func getMyFactories() -> [Factory] {
 
-		return world.factories.values
+		return world.factories
 			.filter { factory in
 				factory.owner == Factory.ownerMe
 			}
@@ -833,10 +833,10 @@ class StrategyAlgorithmHelper {
 
 		for factory in myFactories {
 			for v in 0..<World.factoryCount {
-				let dist = world.distance[factory.id][v]
+				let dist = World.distance[factory.id][v]
 				guard dist < 999 else { continue }
 
-				extendedEdges.append((from: factory, to: world.factories[v]!, dist: dist))
+				extendedEdges.append((from: factory, to: world.factories[v], dist: dist))
 			}
 		}
 
@@ -887,7 +887,7 @@ class StrategyAlgorithmHelper {
 		var mid = l
 		var valueM = valueL
 		var tap = 2
-		while l + 1 < r && tap < 4 {
+		while l + 1 < r && tap < 5 {
 			mid = (l + r) / 2
 			valueM = calc(mid)
 			tap += 1
@@ -1001,6 +1001,7 @@ struct BombStrategy: ChainableStrategyProtocol {
 
 		// TODO: add bombs
 		for edgeEx in helper.myEdgesEx {
+			guard edgeEx.to.owner != Factory.ownerMe else { continue }
 			guard edgeEx.to.productionRate >= minProduction else { continue }
 			guard edgeEx.to.units >= minUnits else { continue }
 			guard edgeEx.dist <= maxDistance else { continue }
@@ -1065,6 +1066,35 @@ struct IncEverywhere: ChainableStrategyProtocol {
 	}
 }
 
+struct WatchDog {
+
+	var begin = clock()
+
+	var yellowZone = 30
+	var redZone = 40
+
+	var isBellowYellow: Bool {
+		return self.millisecondsFromBegin() < yellowZone
+	}
+
+	var isBellowRed: Bool {
+		return self.millisecondsFromBegin() < redZone
+	}
+
+	mutating func reset() {
+
+		self.begin = clock()
+	}
+
+	func millisecondsFromBegin() -> Int {
+
+		let elapsed = Double(clock() - begin) / Double(CLOCKS_PER_SEC)
+		return Int(elapsed * 1_000)
+	}
+}
+
+var watchDog = WatchDog()
+
 struct SmartMovement: ChainableStrategyProtocol {
 
 	/// Algorithm helper
@@ -1083,11 +1113,13 @@ struct SmartMovement: ChainableStrategyProtocol {
 
 		var output = input
 
-		for edgeEx in helper.myEdgesEx.prefix(5) {
+		for edgeEx in helper.myEdgesEx {
+			guard watchDog.isBellowRed else { break }
+
 			let u = edgeEx.from.id
 			let v = edgeEx.to.id
 
-			let availableUnits = helper.world.factories[u]!.units - output.usedCyborgs[u]
+			let availableUnits = helper.world.factories[u].units - output.usedCyborgs[u]
 			let best = helper
 				.binarySearch(0...availableUnits) { units in
 					let loggingWas = loggingEnabled
@@ -1119,7 +1151,23 @@ struct StrategyFactory {
 
 		var orders = PendingOrders()
 		if BombStrategy.bombsLeft > 0 {
-			let bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 10, maxDistance: 5, input: orders)
+			let bombStrategy: BombStrategy
+			switch algorithmHelper.world.turn {
+				case 0..<10:
+					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 15, maxDistance: 10, input: orders)
+
+				case 10...50:
+					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 20, maxDistance: 8, input: orders)
+
+				case 50..<100:
+					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 2, minUnits: 30, maxDistance: 5, input: orders)
+
+				case 100..<150:
+					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 10, maxDistance: 20, input: orders)
+
+				default:
+					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 1, minUnits: 0, maxDistance: 50, input: orders)
+			}
 			orders = bombStrategy.output
 
 			let bombsUsed = orders.actions
@@ -1190,18 +1238,19 @@ func rl() -> String? {
 }
 
 World.factoryCount = Int(rl()!)! // 7 ≤ factoryCount ≤ 15
+world.factories = [Factory](repeating: Factory(entity: Entity.createUnique(type: .factory))!, count: World.factoryCount)
 World.linkCount = Int(rl()!)! // 21 ≤ linkCount ≤ 105
-world.adjList = [[Int]](repeating: [], count: World.factoryCount)
-world.distance = repeatElement(repeatElement(Int.max/2, count: World.factoryCount).map{$0}, count: World.factoryCount).map{$0}
+World.adjList = [[Int]](repeating: [], count: World.factoryCount)
+World.distance = repeatElement(repeatElement(Int.max/2, count: World.factoryCount).map{$0}, count: World.factoryCount).map{$0}
 
 for _ in 0..<World.linkCount {
 	let arr = rl()!.components(separatedBy: " ").flatMap { Int($0) }
 	guard arr.count == 3 else { fatal("arr=\(arr)") }
 
-	world.adjList[arr[0]].append(arr[1])
-	world.adjList[arr[1]].append(arr[0])
-	world.distance[arr[0]][arr[1]] = arr[2]
-	world.distance[arr[1]][arr[0]] = arr[2]
+	World.adjList[arr[0]].append(arr[1])
+	World.adjList[arr[1]].append(arr[0])
+	World.distance[arr[0]][arr[1]] = arr[2]
+	World.distance[arr[1]][arr[0]] = arr[2]
 }
 
 
@@ -1239,8 +1288,6 @@ func readEntities(n: Int) {
 
 }
 
-
-var begin = clock()
 
 // TODO: expect score
 var expectedScore = ""
@@ -1288,9 +1335,7 @@ for turn in 0..<200 {
 		print(Action.wait.description)
 	}
 
-	let end = clock()
-	let elapsed = Double(end - begin) / Double(CLOCKS_PER_SEC)
-	log("measured execution time for turn \(turn) is \(Int(elapsed * 1_000)) ms")
-	begin = end
+	log("measured execution time for turn \(turn) is \(watchDog.millisecondsFromBegin()) ms")
+	watchDog.reset()
 }
 
