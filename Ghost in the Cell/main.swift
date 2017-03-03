@@ -120,17 +120,59 @@ extension Array  {
 	}
 }
 
+extension Sequence {
+
+	func group(_ comp: (Self.Iterator.Element, Self.Iterator.Element) -> Bool) -> [[Self.Iterator.Element]] {
+
+		var result: [[Self.Iterator.Element]] = []
+		var current: [Self.Iterator.Element] = []
+
+		for element in self {
+			if current.isEmpty || comp(element, current.last!) {
+				current.append(element)
+			} else {
+				result.append(current)
+				current = [element]
+			}
+		}
+
+		if !current.isEmpty {
+			result.append(current)
+		}
+
+		return result
+	}
+}
+
+
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
 // MARK: - ここテン
 ////////////////////////////////////////////////////////////////////////////////
 
-enum EntityType: String {
+enum EntityType: CustomStringConvertible {
 
-	case factory = "FACTORY"
-	case troop = "TROOP"
-	case bomb = "BOMB"
+	case factory
+	case troop
+	case bomb
+
+	init?(_ string: String) {
+		switch string {
+			case "FACTORY": self = .factory
+			case "TROOP": self = .troop
+			case "BOMB": self = .bomb
+			default: return nil
+		}
+	}
+
+	var description: String {
+		switch self {
+			case .factory: return "FACTORY"
+			case .troop: return "TROOP"
+			case .bomb: return "BOMB"
+		}
+	}
 }
 
 struct Entity {
@@ -151,7 +193,7 @@ extension Entity {
 		guard input.count == 7 else { return nil }
 
 		guard let id = Int(input[0]) else { return nil }
-		guard let type = EntityType(rawValue: input[1]) else { return nil }
+		guard let type = EntityType(input[1]) else { return nil }
 		let args = input.suffix(from: 2).flatMap { Int($0) }
 		guard args.count == 5 else { return nil }
 
@@ -406,8 +448,8 @@ extension World {
 		// Move troops and bombs
 		// ---
 		var newTroops: [Troop] = []
-		var troopsReadyToFight: [Troop] = []
-		for troop in troops {
+		var battles: [[Troop]] = []
+		for troop in troops.sorted(by: { a, b in a.v < b.v }) {
 			var newTroop = troop
 			newTroop.turnsLeft = troop.turnsLeft - 1
 
@@ -415,7 +457,20 @@ extension World {
 				newTroops.append(newTroop)
 			}
 			else {
-				troopsReadyToFight.append(newTroop)
+				if battles.isEmpty {
+					battles.append([newTroop])
+				}
+				else {
+					if newTroop.v == battles.last!.last!.v {
+						var last = battles.popLast()!
+						last.append(newTroop)
+
+						battles.append(last)
+					}
+					else {
+						battles.append([newTroop])
+					}
+				}
 			}
 		}
 		var newBombs: [Bomb] = []
@@ -533,34 +588,50 @@ extension World {
 		// ---
 		// Solve battles
 		// ---
-		for (i, factory) in newFactories.enumerated() {
-			var forces = [-1:0, 1:0]
-			troopsReadyToFight
-				.filter { troop in
-					troop.v == i
-				}
-				.forEach { troop in
-					forces[troop.owner]! += troop.unitCount
+		for battle in battles {
+
+			let i = battle.first!.v
+
+			typealias BattleForces = (me: Int, opponent: Int)
+			let forces: BattleForces = battle
+				.reduce((me: 0, opponent: 0)) { acc, troop in
+					return (
+						me: troop.owner == Factory.ownerMe
+							? acc.me + troop.unitCount
+							: acc.me,
+						opponent: troop.owner == Factory.ownerOpponent
+							? acc.opponent + troop.unitCount
+							: acc.opponent)
 				}
 
 			// Troops fight with each other first
-			let kia = min(forces[-1]!, forces[1]!)
-			forces[-1]! -= kia
-			forces[1]! -= kia
+			let kia = min(forces.me, forces.opponent)
+
+			var owner: Int
+			var remainingUnits: Int
+			if forces.me > kia {
+				owner = Factory.ownerMe
+				remainingUnits = forces.me - kia
+			}
+			else if forces.opponent > kia {
+				owner = Factory.ownerOpponent
+				remainingUnits = forces.opponent - kia
+			}
+			else {
+				continue
+			}
 
 			// Remaining troops fight with factory defences
-			for (owner, units) in forces {
-				if factory.owner == owner { // same owner
-					newFactories[i].units += units
+			if newFactories[i].owner == owner { // same owner
+				newFactories[i].units += remainingUnits
+			}
+			else { // fight with units defenging factory
+				if remainingUnits > newFactories[i].units { // Attacking forces win, change owner
+					newFactories[i].owner = owner
+					newFactories[i].units = remainingUnits - newFactories[i].units
 				}
-				else { // fight with units defenging factory
-					if units > factory.units { // Attacking forces win, change owner
-						newFactories[i].owner = owner
-						newFactories[i].units = units - factory.units
-					}
-					else { // Defences win
-						newFactories[i].units -= units
-					}
+				else { // Defences win
+					newFactories[i].units -= remainingUnits
 				}
 			}
 		}
@@ -772,14 +843,33 @@ class StrategyAlgorithmHelper {
 		// sort edges
 		extendedEdges
 			.sort { a, b in
-				if a.dist != b .dist {
-					return a.dist < b.dist
-				}
-				else if a.from.id != b.from.id {
-					return a.from.id < b.from.id
+				if a.to.owner != Factory.ownerMe || b.to.owner != Factory.ownerMe {
+					if a.to.owner == Factory.ownerMe || b.to.owner == Factory.ownerMe {
+						return a.to.owner < b.to.owner
+					}
+
+					let Adist = a.dist - a.to.owner*a.to.productionRate
+					let Bdist = b.dist - b.to.owner*b.to.productionRate
+					if Adist != Bdist {
+						return Adist < Bdist
+					}
+					else if a.from.id != b.from.id {
+						return a.from.id < b.from.id
+					}
+					else {
+						return a.to.id < b.to.id
+					}
 				}
 				else {
-					return a.to.id < b.to.id
+					if a.dist != b.dist {
+						return a.dist < b.dist
+					}
+					else if a.from.id != b.from.id {
+						return a.from.id < b.from.id
+					}
+					else {
+						return a.to.id < b.to.id
+					}
 				}
 			}
 
@@ -796,9 +886,11 @@ class StrategyAlgorithmHelper {
 
 		var mid = l
 		var valueM = valueL
-		while l + 1 < r {
+		var tap = 2
+		while l + 1 < r && tap < 4 {
 			mid = (l + r) / 2
 			valueM = calc(mid)
+			tap += 1
 
 			if valueL >= valueR {
 				r = mid
@@ -847,10 +939,8 @@ class StrategyAlgorithmHelper {
 		}
 
 		var evolvingWorld = world.nextTurn(with: orderCopy)
-		autoreleasepool {
-			for _ in 1...turns {
-				evolvingWorld = evolvingWorld.nextTurn()
-			}
+		for _ in 1...turns {
+			evolvingWorld = evolvingWorld.nextTurn()
 		}
 
 		return evolvingWorld.score(owner: Factory.ownerMe) - evolvingWorld.score(owner: Factory.ownerOpponent)
@@ -993,7 +1083,7 @@ struct SmartMovement: ChainableStrategyProtocol {
 
 		var output = input
 
-		for edgeEx in helper.myEdgesEx {
+		for edgeEx in helper.myEdgesEx.prefix(5) {
 			let u = edgeEx.from.id
 			let v = edgeEx.to.id
 
@@ -1025,23 +1115,56 @@ struct StrategyFactory {
 	typealias ChainedStrategyOrders = (strategyNames: [String], orders: PendingOrders)
 	func makeChain() -> ChainedStrategyOrders {
 
-		let bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 10, maxDistance: 5)
-		let incEverywhere = IncEverywhere(helper: algorithmHelper)
-		let smart = SmartMovement(helper: algorithmHelper)
-
-		let chain: [ChainableStrategyProtocol] = [
-			bombStrategy,
-			incEverywhere,
-			smart,
-		]
+		var usedStrategies: [String] = []
 
 		var orders = PendingOrders()
-		for var strategy in chain {
-			strategy.input = orders
-			orders = strategy.output
+		if BombStrategy.bombsLeft > 0 {
+			let bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 10, maxDistance: 5, input: orders)
+			orders = bombStrategy.output
+
+			let bombsUsed = orders.actions
+				.filter { action in
+					switch action {
+						case .bomb: return true
+						default: return false
+					}
+				}
+				.count
+
+			if bombsUsed > 0 {
+				BombStrategy.bombsLeft -= bombsUsed
+				usedStrategies.append(bombStrategy.name)
+			}
+
 		}
 
-		return (strategyNames: chain.map{$0.name}, orders: orders)
+		// INC
+		do {
+			let incEverywhere = IncEverywhere(helper: algorithmHelper, input: orders)
+			let actionsBefore = orders.actions.count
+			orders = incEverywhere.output
+			let actionsAfter = orders.actions.count
+
+			if actionsAfter > actionsBefore {
+				usedStrategies.append(incEverywhere.name)
+			}
+		}
+
+		// Smart
+		do {
+			let smart = SmartMovement(helper: algorithmHelper, input: orders)
+
+			let actionsBefore = orders.actions.count
+			orders = smart.output
+			let actionsAfter = orders.actions.count
+
+			if actionsAfter > actionsBefore {
+				usedStrategies.append(smart.name)
+			}
+
+		}
+
+		return (strategyNames: usedStrategies, orders: orders)
 	}
 }
 
@@ -1117,8 +1240,11 @@ func readEntities(n: Int) {
 }
 
 
+var begin = clock()
+
 // TODO: expect score
 var expectedScore = ""
+var expectedOrders = PendingOrders()
 for turn in 0..<200 {
 
 	if let line = rl(), let entityCount = Int(line) {
@@ -1128,7 +1254,7 @@ for turn in 0..<200 {
 	}
 	else {
 		log("\n--- Stand alone complex @ turn \(turn) ---")
-		world = world.nextTurn()
+		world = world.nextTurn(with: expectedOrders)
 	}
 
 	if feof(stdin) != 0 {
@@ -1148,17 +1274,23 @@ for turn in 0..<200 {
 	let algorithmist = StrategyAlgorithmHelper(world: world)
 	var strategyFactory = StrategyFactory(algorithmHelper: algorithmist)
 
-	if case let chained = strategyFactory.makeChain(), chained.orders.actions.count > 0 {
-		expectedScore = world.nextTurn(with: chained.orders).-->scoreFormat
+	let chained = strategyFactory.makeChain()
+	expectedOrders = chained.orders
+	expectedScore = world.nextTurn(with: expectedOrders).-->scoreFormat
+
+	if expectedOrders.actions.count > 0 {
 
 		print(Action.printableArray(of: chained.orders.actions) + ";MSG \(chained.strategyNames.joined(separator: "-&>"))")
 	}
 	else {
 		log("no strategies available")
-		expectedScore = world.nextTurn().-->scoreFormat
 
 		print(Action.wait.description)
 	}
-}
 
+	let end = clock()
+	let elapsed = Double(end - begin) / Double(CLOCKS_PER_SEC)
+	log("measured execution time for turn \(turn) is \(Int(elapsed * 1_000)) ms")
+	begin = end
+}
 
