@@ -877,7 +877,7 @@ class StrategyAlgorithmHelper {
 	}
 
 	/// Binary search for maximum of one-dimension function `calc` on closed interval of Int arguments
-	func binarySearch(_ closedRange: CountableClosedRange<Int>, calc: (Int) -> Int) -> Int {
+	func binarySearch(_ closedRange: CountableClosedRange<Int>, maxTap: Int = 5, calc: (Int) -> Int) -> Int {
 		guard closedRange.count > 0 else { return 0 }
 
 		var l = closedRange.lowerBound, r = closedRange.upperBound
@@ -887,7 +887,7 @@ class StrategyAlgorithmHelper {
 		var mid = l
 		var valueM = valueL
 		var tap = 2
-		while l + 1 < r && tap < 5 {
+		while l + 1 < r && tap < maxTap {
 			mid = (l + r) / 2
 			valueM = calc(mid)
 			tap += 1
@@ -916,13 +916,28 @@ class StrategyAlgorithmHelper {
 
 	func score(after turns: Int, orders: PendingOrders, newAction: Action) -> Int {
 
-		guard turns > 1 else { log("Cannot score for \(turns) turns."); return 0 }
-		var u = 0
-		var units = 0
+		guard turns > 1 else { log("Cannot score for \(turns) turns."); return -999 }
+
+		let loggingWas = loggingEnabled
+		loggingEnabled = false
+		defer { loggingEnabled = loggingWas }
+
+		var orderCopy = orders
+
 		switch newAction {
-			case .move(let lu, _, let lcount):
-				u = lu
-				units = lcount
+			case .move(let u, _, let units):
+				if units > 0  {
+					orderCopy.actions.append(newAction)
+					orderCopy.usedCyborgs[u] += units
+				}
+
+			case .inc(let factory):
+				if world.factories[factory].owner == Factory.ownerMe
+					&& world.factories[factory].units - orderCopy.usedCyborgs[factory] >= 10 {
+
+					orderCopy.actions.append(newAction)
+					orderCopy.usedCyborgs[factory] += 10
+				}
 
 			case .wait:
 				break
@@ -932,14 +947,53 @@ class StrategyAlgorithmHelper {
 				return 0
 		}
 
-		var orderCopy = orders
-		if( units > 0 ) {
-			orderCopy.actions.append(newAction)
-			orderCopy.usedCyborgs[u] += units
-		}
 
 		var evolvingWorld = world.nextTurn(with: orderCopy)
 		for _ in 1...turns {
+			evolvingWorld = evolvingWorld.nextTurn()
+		}
+
+		return evolvingWorld.score(owner: Factory.ownerMe) - evolvingWorld.score(owner: Factory.ownerOpponent)
+	}
+
+	func delayedScore(after turns: Int, orders: PendingOrders, newAction: Action) -> Int {
+
+		guard turns > 2 else { log("Cannot score for \(turns) turns."); return -999 }
+
+		let loggingWas = loggingEnabled
+		loggingEnabled = false
+		defer { loggingEnabled = loggingWas }
+
+		var evolvingWorld = world.nextTurn(with: orders)
+		var newOrder = PendingOrders()
+
+		switch newAction {
+			case .move(let u, _, let units):
+				let remainedUnits = min(units, evolvingWorld.factories[u].units)
+				if( remainedUnits > 0 && evolvingWorld.factories[u].owner == Factory.ownerMe) {
+					newOrder.actions.append(newAction)
+					newOrder.usedCyborgs[u] = remainedUnits
+				}
+
+			case .inc(let factory):
+				if evolvingWorld.factories[factory].owner == Factory.ownerMe
+					&& evolvingWorld.factories[factory].units >= 10 {
+
+					newOrder.actions.append(newAction)
+					newOrder.usedCyborgs[factory] += 10
+				}
+
+			case .wait:
+				break
+
+			default:
+				log("Unexpected action \(newAction)")
+				return 0
+		}
+
+
+		evolvingWorld = world.nextTurn(with: newOrder)
+		for _ in 2...turns {
 			evolvingWorld = evolvingWorld.nextTurn()
 		}
 
@@ -1011,8 +1065,8 @@ struct BombStrategy: ChainableStrategyProtocol {
 
 			let samePathAction = output.actions.first { action in
 				switch action {
-					case .bomb(let bu, let bv):
-						return bu == u && v == bv
+					case .bomb(_, let bv):
+						return v == bv
 
 					case .move(let mu, let mv, _):
 						return mu == u && mv == v
@@ -1031,7 +1085,7 @@ struct BombStrategy: ChainableStrategyProtocol {
 	}
 }
 
-struct IncEverywhere: ChainableStrategyProtocol {
+struct IncSafe: ChainableStrategyProtocol {
 
 	/// Algorithm helper
 	let helper: StrategyAlgorithmHelper
@@ -1041,7 +1095,7 @@ struct IncEverywhere: ChainableStrategyProtocol {
 		self.input = input
 	}
 
-	var name: String { return "IncEverywhere" }
+	var name: String { return "IncSafe" }
 
 	var input: PendingOrders
 
@@ -1055,10 +1109,19 @@ struct IncEverywhere: ChainableStrategyProtocol {
 			var productionRate = factory.productionRate
 
 			while unitsAvailable >= 10 && productionRate < 3 {
-				output.actions.append(.inc(factory: fid))
-				unitsAvailable -= 10
-				output.usedCyborgs[fid] += 10
-				productionRate += 1
+
+				let delayedScore = helper.delayedScore(after: 20, orders: output, newAction: .inc(factory: fid))
+				let immediateScore = helper.score(after: 20, orders: output, newAction: .inc(factory: fid))
+
+				if immediateScore > delayedScore {
+					output.actions.append(.inc(factory: fid))
+					unitsAvailable -= 10
+					output.usedCyborgs[fid] += 10
+					productionRate += 1
+				}
+				else {
+					break
+				}
 			}
 		}
 
@@ -1066,12 +1129,18 @@ struct IncEverywhere: ChainableStrategyProtocol {
 	}
 }
 
+
 struct WatchDog {
 
 	var begin = clock()
 
+	var greenZone = 10
 	var yellowZone = 30
-	var redZone = 40
+	var redZone = 42
+
+	var isBellowGreen: Bool {
+		return self.millisecondsFromBegin() < greenZone
+	}
 
 	var isBellowYellow: Bool {
 		return self.millisecondsFromBegin() < yellowZone
@@ -1095,7 +1164,7 @@ struct WatchDog {
 
 var watchDog = WatchDog()
 
-struct SmartMovement: ChainableStrategyProtocol {
+struct SmarterMovement: ChainableStrategyProtocol {
 
 	/// Algorithm helper
 	let helper: StrategyAlgorithmHelper
@@ -1105,7 +1174,7 @@ struct SmartMovement: ChainableStrategyProtocol {
 		self.input = input
 	}
 
-	var name: String { return "SmartMovement" }
+	var name: String { return "SmarterMovement" }
 
 	var input: PendingOrders
 
@@ -1113,28 +1182,33 @@ struct SmartMovement: ChainableStrategyProtocol {
 
 		var output = input
 
+		let total = helper.myEdgesEx.count
+		var processed = 0
 		for edgeEx in helper.myEdgesEx {
 			guard watchDog.isBellowRed else { break }
+			processed += 1
 
 			let u = edgeEx.from.id
 			let v = edgeEx.to.id
 
 			let availableUnits = helper.world.factories[u].units - output.usedCyborgs[u]
 			let best = helper
-				.binarySearch(0...availableUnits) { units in
-					let loggingWas = loggingEnabled
-					loggingEnabled = false
-					defer { loggingEnabled = loggingWas }
-
+				.binarySearch(0...availableUnits, maxTap: 170 / (total+1)) { units in
 					return helper.score(after: 20, orders: output, newAction: Action.move(u: u, v: v, count: units))
 				}
 
 			if best > 0 {
-				output.actions.append(.move(u: u, v: v, count: best))
-				output.usedCyborgs[u] += best
+				let delayedScore = helper.delayedScore(after: 20, orders: output, newAction: Action.move(u: u, v: v, count: best))
+				let immediateScore = helper.score(after: 20, orders: output, newAction: Action.move(u: u, v: v, count: best))
+
+				if immediateScore > delayedScore {
+					output.actions.append(.move(u: u, v: v, count: best))
+					output.usedCyborgs[u] += best
+				}
 			}
 		}
 
+		log("Processed \(processed)/\(total) edges");
 		return output
 	}
 }
@@ -1188,19 +1262,19 @@ struct StrategyFactory {
 
 		// INC
 		do {
-			let incEverywhere = IncEverywhere(helper: algorithmHelper, input: orders)
+			let incSafe = IncSafe(helper: algorithmHelper, input: orders)
 			let actionsBefore = orders.actions.count
-			orders = incEverywhere.output
+			orders = incSafe.output
 			let actionsAfter = orders.actions.count
 
 			if actionsAfter > actionsBefore {
-				usedStrategies.append(incEverywhere.name)
+				usedStrategies.append(incSafe.name)
 			}
 		}
 
 		// Smart
 		do {
-			let smart = SmartMovement(helper: algorithmHelper, input: orders)
+			let smart = SmarterMovement(helper: algorithmHelper, input: orders)
 
 			let actionsBefore = orders.actions.count
 			orders = smart.output
@@ -1209,7 +1283,7 @@ struct StrategyFactory {
 			if actionsAfter > actionsBefore {
 				usedStrategies.append(smart.name)
 			}
-
+			
 		}
 
 		return (strategyNames: usedStrategies, orders: orders)
