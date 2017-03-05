@@ -144,6 +144,30 @@ extension Sequence {
 	}
 }
 
+extension MutableCollection where Indices.Iterator.Element == Index {
+	/// Shuffles the contents of this collection.
+	mutating func shuffle() {
+		let c = count
+		guard c > 1 else { return }
+
+		for (firstUnshuffled , unshuffledCount) in zip(indices, stride(from: c, to: 1, by: -1)) {
+			let d: IndexDistance = random[0...numericCast(unshuffledCount-1)].-->numericCast
+			guard d != 0 else { continue }
+			let i = index(firstUnshuffled, offsetBy: d)
+			swap(&self[firstUnshuffled], &self[i])
+		}
+	}
+}
+
+extension Sequence {
+	/// Returns an array with the contents of this sequence, shuffled.
+	func shuffled() -> [Iterator.Element] {
+		var result = Array(self)
+		result.shuffle()
+		return result
+	}
+}
+
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -527,7 +551,7 @@ extension World {
 
 						case let .inc(id):
 							if id == fid && factory.productionRate < 3 && factory.units >= 10 {
-								factory.productionRate += 10
+								factory.productionRate += 1
 								factory.units -= 10
 							}
 
@@ -543,7 +567,6 @@ extension World {
 							troop.turnsLeft = World.distance[moveAction.u][moveAction.v]
 							if moveAction.u == fid {
 								factory.units -= moveAction.count
-								score += moveAction.count
 							}
 							if moveAction.v == fid {
 								filteredTroops.append(troop)
@@ -558,7 +581,9 @@ extension World {
 			// ---
 			// Create new units
 			// ---
-			factory.units += factory.productionRate * delta
+			if factory.owner != Factory.ownerNeutral {
+				factory.units += factory.productionRate * delta
+			}
 
 			// ---
 			// Solve Battles
@@ -601,11 +626,29 @@ extension World {
 			}
 
 			// ---
+			// Inc if you can!
+			// ---
+//			if factory.owner != Factory.ownerNeutral && evaluatedTurn < turns - 11 {
+//				if filteredTroops.filter({ troop in troop.owner != factory.owner }).count == 0 {
+//					// No troops can stop us!
+//					// Increase  production
+//					if factory.productionRate < 3 && factory.units >= 10 {
+//						let newAction = Action.inc(factory: factory.id)
+//						newOrders.actions.append(newAction)
+//					}
+//				}
+//			}
+
+			// ---
 			// Calculate time to nearest event
 			// ---
 			do {
 				evaluatedTurn += delta
 				if delayed == evaluatedTurn {
+					delta = 1
+					continue
+				}
+				if newOrders.actions.count > 0 {
 					delta = 1
 					continue
 				}
@@ -630,9 +673,8 @@ extension World {
 			}
 		}
 
-		score += factory.owner * (factory.units + factory.productionRate)
-		score += 3 * min(3 - factory.productionRate, factory.units / 10) // Inc potencial is bonus
-		score += filteredTroops.reduce(0) { acc, troop in acc + troop.owner * troop.unitCount }
+		score += factory.owner * factory.units
+		score += 1 * min(3 - factory.productionRate, factory.units / 10) // Inc potencial is bonus
 		return score
 	}
 
@@ -979,6 +1021,9 @@ struct BombAdviser {
 	}
 }
 
+var bombAdviser = BombAdviser()
+
+
 class StrategyAlgorithmHelper {
 
 	/// world
@@ -1053,6 +1098,24 @@ class StrategyAlgorithmHelper {
 			}
 	}
 
+	lazy var dangerFactor: [Int] = { return self.getDangerFactor() }()
+	private func getDangerFactor() -> [Int] {
+
+		var targets: [Int] = []
+		for v in 0..<world.factories.count {
+			var danger = 0
+			for u in 0..<world.factories.count {
+				guard u != v else { continue }
+				guard world.factories[u].owner == Factory.ownerOpponent else { continue }
+
+				danger += (500+10*world.factories[u].units)/World.distance[u][v]
+			}
+			targets.append(danger)
+		}
+
+		return targets
+	}
+
 	typealias FactoryEdgeEx = (from: Factory, to: Factory, dist: Int)
 	/// Sorting order by less distacne, source id, target id
 	lazy var myEdgesEx: [FactoryEdgeEx] = { return self.getMyExtendedEdges() }()
@@ -1072,19 +1135,36 @@ class StrategyAlgorithmHelper {
 		// sort edges
 		extendedEdges
 			.sort { a, b in
-//				let Adist = a.dist - a.to.owner*a.to.productionRate
-//				let Bdist = b.dist - b.to.owner*b.to.productionRate
-//				if Adist != Bdist {
-//					return Adist < Bdist
-//				}
-				if a.dist != b.dist {
-					return a.dist < b.dist
+				if dangerFactor[a.to.id] != dangerFactor[b.to.id] {
+					return dangerFactor[a.to.id] < dangerFactor[b.to.id]
 				}
-				else if a.from.id != b.from.id {
-					return a.from.id < b.from.id
+				else if a.to.owner != Factory.ownerMe || b.to.owner != Factory.ownerMe {
+					if a.to.owner == Factory.ownerMe || b.to.owner == Factory.ownerMe {
+						return a.to.owner < b.to.owner
+					}
+
+					let Adist = a.dist - a.to.owner*a.to.productionRate
+					let Bdist = b.dist - b.to.owner*b.to.productionRate
+					if Adist != Bdist {
+						return Adist < Bdist
+					}
+					else if a.from.id != b.from.id {
+						return a.from.id < b.from.id
+					}
+					else {
+						return a.to.id < b.to.id
+					}
 				}
 				else {
-					return a.to.id < b.to.id
+					if a.dist != b.dist {
+						return a.dist < b.dist
+					}
+					else if a.from.id != b.from.id {
+						return a.from.id < b.from.id
+					}
+					else {
+						return a.to.id < b.to.id
+					}
 				}
 			}
 
@@ -1477,14 +1557,17 @@ struct SmarterMovement: ChainableStrategyProtocol {
 	/// Algorithm helper
 	let helper: StrategyAlgorithmHelper
 
-	init(helper: StrategyAlgorithmHelper, input: PendingOrders = PendingOrders()) {
+	init(helper: StrategyAlgorithmHelper, input: PendingOrders = PendingOrders(), shouldShuffle: Bool) {
 		self.helper = helper
 		self.input = input
+		self.shouldShuffle = shouldShuffle
 	}
 
 	var name: String { return "SmarterMovement" }
 
 	var input: PendingOrders
+
+	let shouldShuffle: Bool
 
 	var output: PendingOrders {
 
@@ -1492,7 +1575,11 @@ struct SmarterMovement: ChainableStrategyProtocol {
 
 		let total = helper.myEdgesEx.count
 		var processed = 0
-		for edgeEx in helper.myEdgesEx {
+
+		let edges = shouldShuffle
+			? helper.myEdgesEx.shuffled()
+			: helper.myEdgesEx
+		for edgeEx in edges {
 			guard watchDog.isBellowRed else { break }
 			processed += 1
 
@@ -1501,8 +1588,9 @@ struct SmarterMovement: ChainableStrategyProtocol {
 
 			let availableUnits = helper.world.factories[u].units - output.usedCyborgs[u]
 			let best = helper
-				.goldenSearch(0...availableUnits, maxTap: 1700 / (total+1)) { units in
-					return helper.fastScore(newAction: Action.move(u: u, v: v, count: units), orders: output, turns: 20, delayed: 0)
+				.goldenSearch(0...availableUnits, maxTap: 541 / (total+1)) { units in
+					let score = helper.fastScore(newAction: Action.move(u: u, v: v, count: units), orders: output, turns: 20, delayed: 0)
+					return score
 				}
 
 			if best > 0 {
@@ -1520,6 +1608,51 @@ struct SmarterMovement: ChainableStrategyProtocol {
 		return output
 	}
 }
+
+struct PushForces: ChainableStrategyProtocol {
+
+	/// Algorithm helper
+	let helper: StrategyAlgorithmHelper
+
+	init(helper: StrategyAlgorithmHelper, input: PendingOrders = PendingOrders()) {
+		self.helper = helper
+		self.input = input
+	}
+
+	var name: String { return "PushForces" }
+
+	var input: PendingOrders
+
+	var output: PendingOrders {
+
+		var ordersCopy = input
+
+		var goodScore = helper.score(after: 20, orders: ordersCopy, newAction: .wait, options: .wait)
+
+		let lessDangerFirst = helper.myFactories.sorted(by: { a, b in helper.dangerFactor[a.id] < helper.dangerFactor[b.id]})
+		for u in lessDangerFirst {
+			for v in helper.myFactories.sorted(by: { a, b in World.distance[u.id][a.id] < World.distance[u.id][b.id]}) {
+				if helper.dangerFactor[v.id] > helper.dangerFactor[u.id] {
+					let available = u.units - ordersCopy.usedCyborgs[u.id]
+					guard available > 1  else { continue }
+
+					let newAction = Action.move(u: u.id, v: v.id, count: available / 2)
+					let newScore = helper.score(after: 20, orders: ordersCopy, newAction: newAction, options: .wait)
+					if newScore >= goodScore {
+						ordersCopy.actions.append(newAction)
+						ordersCopy.usedCyborgs[u.id] += available / 2
+						goodScore = newScore
+					}
+				}
+			}
+
+			guard watchDog.isBellowRed else { break }
+		}
+
+		return ordersCopy
+	}
+}
+
 
 struct StrategyFactory {
 
@@ -1570,29 +1703,39 @@ struct StrategyFactory {
 
 
 		// Smart
-		do {
-			let smart = SmarterMovement(helper: algorithmHelper, input: orders)
+		var bestScore = -9999
+		var bestOrders = orders
+		for shuffles in 0..<12  {
+			guard watchDog.isBellowRed else { break }
 
-			let actionsBefore = orders.actions.count
-			orders = smart.output
-			let actionsAfter = orders.actions.count
+			var ordersCopy = orders
 
-			if actionsAfter > actionsBefore {
-				usedStrategies.append(smart.name)
+			var incSafeCalculated = false
+			if world.turn > 15 || bombAdviser.registeredLaunches.count > 0 {
+				let incSafe = IncSafe(helper: algorithmHelper, input: ordersCopy)
+				ordersCopy = incSafe.output
+				incSafeCalculated = true
 			}
 
-		}
+			let shouldShuffle = shuffles > 0
+			let smart = SmarterMovement(helper: algorithmHelper, input: ordersCopy, shouldShuffle: shouldShuffle)
+			ordersCopy = smart.output
 
-		if world.turn > 0 { // But you can if there is no other options
-			let incSafe = IncSafe(helper: algorithmHelper, input: orders)
-			let actionsBefore = orders.actions.count
-			orders = incSafe.output
-			let actionsAfter = orders.actions.count
+			if !incSafeCalculated {
+				let incSafe = IncSafe(helper: algorithmHelper, input: ordersCopy)
+				ordersCopy = incSafe.output
+			}
 
-			if actionsAfter > actionsBefore {
-				usedStrategies.append(incSafe.name)
+			let pushForces = PushForces(helper: algorithmHelper, input: ordersCopy)
+			ordersCopy = pushForces.output
+
+			let newScore = algorithmHelper.score(after: 20, orders: ordersCopy, newAction: .wait, options: .increase)
+			if newScore > bestScore {
+				bestScore = newScore
+				bestOrders = ordersCopy
 			}
 		}
+		orders = bestOrders
 
 		return (strategyNames: usedStrategies, orders: orders)
 	}
@@ -1604,7 +1747,6 @@ struct StrategyFactory {
 ////////////////////////////////////////////////////////////////////////////////
 
 var world = World()
-var bombAdviser = BombAdviser()
 
 var turn = 0
 // turn 0
