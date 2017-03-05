@@ -216,6 +216,9 @@ extension Entity {
 	static func createUnique(type: EntityType) -> Entity {
 
 		let id = Entity.uuid; Entity.uuid += 1
+		if Entity.uuid > 32000 { // overflow, reuse old uuids
+			Entity.uuid = 1000
+		}
 
 		return Entity(id: id, type: type, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0)
 	}
@@ -426,6 +429,12 @@ struct PendingOrders {
 	var actions: [Action] = []
 }
 
+enum WorldSimulationOptions {
+	case wait
+	case increase
+}
+
+
 extension World {
 
 	/// Game score. owner is 1 for me and -1 for opponent
@@ -443,8 +452,241 @@ extension World {
 		return inFactories + inTroops
 	}
 
+	/// Game score. owner is 1 for me and -1 for opponent
+	func scoreProduction(owner: Int) -> Int {
+
+		return factories
+			.filter { $0.owner == owner }
+			.map { factory in 10 * factory.productionRate }
+			.reduce(0, +)
+	}
+
+	/// Score production as 10 points
+	func scoreDifference(includeProduction: Bool) -> Int {
+
+		var scoreMe = score(owner: Factory.ownerMe)
+		var scoreOpponent = score(owner: Factory.ownerOpponent)
+
+		if includeProduction {
+			scoreMe += scoreProduction(owner: Factory.ownerMe)
+			scoreOpponent += scoreProduction(owner: Factory.ownerOpponent)
+		}
+
+		return scoreMe - scoreOpponent
+	}
+
+	func scoreDiff(factory fid: Int, turns: Int, delayed: Int, orders: PendingOrders, newAction: Action) -> Int {
+		guard delayed <= 1 else { log("Not expeced long delays"); return -999 }
+		guard case let .move(newMove) = newAction else { return -999 }
+
+		var score = 0
+		var factory = factories[fid]
+		var filteredTroops = troops
+			.filter { troop in troop.v == fid }
+		var filteredBombs = bombs
+			.filter { bomb in bomb.destination == fid }
+		var delta = 1
+		var evaluatedTurn = 0
+		var newOrders = orders
+		while evaluatedTurn < turns {
+			// ---
+			// Move troops
+			// ---
+			move(troops: &filteredTroops, turns: delta)
+			move(bombs: &filteredBombs, turns: delta)
+
+			// ---
+			// Decrease disabled countdown
+			// ---
+			factory.disabled = max(0, factory.disabled - delta)
+
+			// ---
+			// Execute orders
+			// ---
+			do {
+				defer {	newOrders.actions.removeAll() }
+
+				if delayed == evaluatedTurn {
+					newOrders.actions.append(newAction)
+					newOrders.usedCyborgs[newMove.u] += newMove.count
+				}
+				for action in newOrders.actions {
+					switch action {
+						case let .bomb(bombAction):
+							let baseEntity = Entity.createUnique(type: .bomb)
+							guard var bomb = Bomb(entity: baseEntity) else { log("Cannot create bomb with \(action)"); continue }
+
+							bomb.owner = Factory.ownerMe
+							bomb.source = bombAction.u
+							bomb.destination = bombAction.v
+							bomb.turnsLeft = World.distance[bombAction.u][bombAction.v]
+
+							if bombAction.v == fid {
+								filteredBombs.append(bomb)
+							}
+
+						case let .inc(id):
+							if id == fid && factory.productionRate < 3 && factory.units >= 10 {
+								factory.productionRate += 10
+								factory.units -= 10
+							}
+
+						case let .move(moveAction):
+							// TODO: I assume check is done before calling this method, but are they?
+							let baseEntity = Entity.createUnique(type: .troop)
+							guard var troop = Troop(entity: baseEntity) else { log("Cannot create troop with \(action)"); continue}
+
+							troop.owner = Factory.ownerMe
+							troop.u = moveAction.u
+							troop.v = moveAction.v
+							troop.unitCount = moveAction.count
+							troop.turnsLeft = World.distance[moveAction.u][moveAction.v]
+							if moveAction.u == fid {
+								factory.units -= moveAction.count
+								score += moveAction.count
+							}
+							if moveAction.v == fid {
+								filteredTroops.append(troop)
+							}
+
+						case .wait:
+							break
+					}
+				}
+			}
+
+			// ---
+			// Create new units
+			// ---
+			factory.units += factory.productionRate * delta
+
+			// ---
+			// Solve Battles
+			// ---
+			do {
+				let readyForBattle = filteredTroops.filter { troop in troop.turnsLeft <= 0 }
+				defer {
+					filteredTroops = filteredTroops.filter { troop in troop.turnsLeft > 0 }
+				}
+
+				var forces: BattleForces = (me: 0, you: 0)
+				for troop in readyForBattle {
+					if troop.owner == Factory.ownerMe {
+						forces.me += troop.unitCount
+					}
+					else {
+						forces.you += troop.unitCount
+					}
+				}
+
+				solveBattle(factory: &factory, forces: forces)
+			}
+
+			// ---
+			// Solve bombs
+			// ---
+			do {
+				let readyToExplode = filteredBombs.filter { bomb in bomb.turnsLeft <= 0 }
+				defer {
+					filteredBombs = filteredBombs.filter { bomb in bomb.turnsLeft > 0 }
+				}
+
+				for bomb in readyToExplode {
+					guard bomb.destination == fid else { continue }
+
+					let damage = min(factory.units, max(10, factory.units/2))
+					factory.units -= damage
+					factory.disabled = 5
+				}
+			}
+
+			// ---
+			// Calculate time to nearest event
+			// ---
+			do {
+				evaluatedTurn += delta
+				if delayed == evaluatedTurn {
+					delta = 1
+					continue
+				}
+				let max = turns - evaluatedTurn
+				let disabledEnds = factory.disabled > 0
+					? factory.disabled
+					: max
+				let troopEvent = filteredTroops
+					.reduce(max) { acc, troop in
+						return min(acc, troop.turnsLeft)
+					}
+				let bombEvent = filteredBombs
+					.reduce(max) { acc, bomb in
+						return min(acc, bomb.turnsLeft)
+					}
+
+				delta = [max, disabledEnds, troopEvent, bombEvent].min()!
+				if delta == 0 && evaluatedTurn < turns {
+					log("Have unprecessed events on loop end.")
+					return -999
+				}
+			}
+		}
+
+		score += factory.owner * (factory.units + factory.productionRate)
+		score += 3 * min(3 - factory.productionRate, factory.units / 10) // Inc potencial is bonus
+		score += filteredTroops.reduce(0) { acc, troop in acc + troop.owner * troop.unitCount }
+		return score
+	}
+
+	func move(bombs: inout [Bomb], turns: Int = 1) {
+
+		for i in bombs.indices {
+			bombs[i].turnsLeft -= turns
+		}
+	}
+
+	func move(troops: inout [Troop], turns: Int = 1) {
+
+		for i in troops.indices {
+			troops[i].turnsLeft -= turns
+		}
+	}
+
+	typealias BattleForces = (me: Int, you: Int)
+	func solveBattle(factory: inout Factory, forces: BattleForces)
+	{
+		// Troops fight with each other first
+		let kia = min(forces.me, forces.you)
+
+		var owner: Int
+		var remainingUnits: Int
+		if forces.me > kia {
+			owner = Factory.ownerMe
+			remainingUnits = forces.me - kia
+		}
+		else if forces.you > kia {
+			owner = Factory.ownerOpponent
+			remainingUnits = forces.you - kia
+		}
+		else {
+			return
+		}
+
+		// Remaining troops fight with factory defences
+		if factory.owner == owner { // same owner
+			factory.units += remainingUnits
+		}
+		else { // fight with units defenging factory
+			if remainingUnits > factory.units { // Attacking forces win, change owner
+				factory.owner = owner
+				factory.units = remainingUnits - factory.units
+			}
+			else { // Defences win
+				factory.units -= remainingUnits
+			}
+		}
+	}
+
 	/// World state on next turn assuming WAIT action from players
-	func nextTurn(with orders: PendingOrders? = nil) -> World {
+	func nextTurn(with orders: PendingOrders? = nil, options: WorldSimulationOptions) -> World {
 
 		// ---
 		// Move troops and bombs
@@ -576,6 +818,23 @@ extension World {
 			newTroops.append(contentsOf: veryNewTroops)
 		}
 
+		// ---
+		// Give orders based on default begavior in options
+		// ---
+		switch options {
+			case .increase:
+				for factory in newFactories {
+					guard factory.owner != Factory.ownerNeutral else { continue }
+					while newFactories[factory.id].productionRate < 3 && newFactories[factory.id].units >= 10 {
+						newFactories[factory.id].productionRate += 1
+						newFactories[factory.id].units -= 10
+					}
+				}
+
+			case .wait:
+				break
+		}
+
 
 		// ---
 		// Create new units
@@ -594,48 +853,18 @@ extension World {
 
 			let i = battle.first!.v
 
-			typealias BattleForces = (me: Int, opponent: Int)
 			let forces: BattleForces = battle
-				.reduce((me: 0, opponent: 0)) { acc, troop in
+				.reduce((me: 0, you: 0)) { acc, troop in
 					return (
 						me: troop.owner == Factory.ownerMe
 							? acc.me + troop.unitCount
 							: acc.me,
-						opponent: troop.owner == Factory.ownerOpponent
-							? acc.opponent + troop.unitCount
-							: acc.opponent)
+						you: troop.owner == Factory.ownerOpponent
+							? acc.you + troop.unitCount
+							: acc.you)
 				}
 
-			// Troops fight with each other first
-			let kia = min(forces.me, forces.opponent)
-
-			var owner: Int
-			var remainingUnits: Int
-			if forces.me > kia {
-				owner = Factory.ownerMe
-				remainingUnits = forces.me - kia
-			}
-			else if forces.opponent > kia {
-				owner = Factory.ownerOpponent
-				remainingUnits = forces.opponent - kia
-			}
-			else {
-				continue
-			}
-
-			// Remaining troops fight with factory defences
-			if newFactories[i].owner == owner { // same owner
-				newFactories[i].units += remainingUnits
-			}
-			else { // fight with units defenging factory
-				if remainingUnits > newFactories[i].units { // Attacking forces win, change owner
-					newFactories[i].owner = owner
-					newFactories[i].units = remainingUnits - newFactories[i].units
-				}
-				else { // Defences win
-					newFactories[i].units -= remainingUnits
-				}
-			}
+			solveBattle(factory: &newFactories[i], forces: forces)
 		}
 
 		// ---
@@ -843,33 +1072,19 @@ class StrategyAlgorithmHelper {
 		// sort edges
 		extendedEdges
 			.sort { a, b in
-				if a.to.owner != Factory.ownerMe || b.to.owner != Factory.ownerMe {
-					if a.to.owner == Factory.ownerMe || b.to.owner == Factory.ownerMe {
-						return a.to.owner < b.to.owner
-					}
-
-					let Adist = a.dist - a.to.owner*a.to.productionRate
-					let Bdist = b.dist - b.to.owner*b.to.productionRate
-					if Adist != Bdist {
-						return Adist < Bdist
-					}
-					else if a.from.id != b.from.id {
-						return a.from.id < b.from.id
-					}
-					else {
-						return a.to.id < b.to.id
-					}
+//				let Adist = a.dist - a.to.owner*a.to.productionRate
+//				let Bdist = b.dist - b.to.owner*b.to.productionRate
+//				if Adist != Bdist {
+//					return Adist < Bdist
+//				}
+				if a.dist != b.dist {
+					return a.dist < b.dist
+				}
+				else if a.from.id != b.from.id {
+					return a.from.id < b.from.id
 				}
 				else {
-					if a.dist != b.dist {
-						return a.dist < b.dist
-					}
-					else if a.from.id != b.from.id {
-						return a.from.id < b.from.id
-					}
-					else {
-						return a.to.id < b.to.id
-					}
+					return a.to.id < b.to.id
 				}
 			}
 
@@ -914,9 +1129,78 @@ class StrategyAlgorithmHelper {
 		}
 	}
 
-	func score(after turns: Int, orders: PendingOrders, newAction: Action) -> Int {
+	/// Helper constants for golden ratio
+	enum PhiSlice: Double {
 
-		guard turns > 1 else { log("Cannot score for \(turns) turns."); return -999 }
+		case left = 0.3819660115 // 1.0 - 0.5*(sqrt(5.0) - 1)
+		case right = 0.6180339885 // 0.5*(sqrt(5.0) - 1)
+
+		var flipped: PhiSlice {
+
+			switch self {
+				case .left: return .right
+				case .right: return .left
+			}
+		}
+	}
+
+	/// Select a golden ratio point
+	func slicePoint(_ spin: PhiSlice, l: Int16, r: Int16) -> Int16 {
+		guard r - l > 1 else { log("Wrong slice"); return r }
+
+		let slicable = r - l - 2
+		return l + 1 + Int(round(Double(slicable) * spin.rawValue))
+	}
+
+	typealias CaseAlphaResult = (Int16, Int)
+	/// Golden ratio search subcase for searching in range (l;r]
+	func caseAlpha(l: Int16, r: Int16, valueR: Int, spin: PhiSlice, maxDepth: Int16, calc: (Int) -> Int) -> CaseAlphaResult {
+		guard r - l > 1 else { return (r, valueR) }
+		guard maxDepth > 0 else { return (r, valueR) }
+
+		let mid = slicePoint(spin, l: l, r: r)
+		let valueM = calc(Int(mid))
+
+		if valueM >= valueR {
+			/// continue search in (l; mid]
+			return caseAlpha(l: l, r: mid, valueR: valueM, spin: .left, maxDepth: maxDepth-1, calc: calc)
+		}
+		else {
+			/// continue search in (mid; R]
+			return caseAlpha(l: mid, r: r, valueR: valueR, spin: .right, maxDepth: maxDepth-1, calc: calc)
+		}
+	}
+
+	/// Binary search for maximum of one-dimension function `calc` on closed interval of Int arguments
+	/// Use CaseAlphaResult to reduce calc
+	func goldenSearch(_ closedRange: CountableClosedRange<Int>, maxTap: Int = 6, calc: (Int) -> Int) -> Int {
+		guard closedRange.count > 0 else { return 0 }
+
+		let l = closedRange.lowerBound, r = closedRange.upperBound
+		let valueR = calc(r)
+
+		let result = caseAlpha(l: Int16(l), r: Int16(r), valueR: valueR, spin: .left, maxDepth: Int16(maxTap-2), calc: calc)
+
+		let valueL = calc(l)
+		if valueL >= result.1 {
+			return l
+		}
+		else {
+			return Int(result.0)
+		}
+	}
+
+	func fastScore(newAction: Action, orders: PendingOrders, turns: Int, delayed: Int) -> Int {
+		guard case let .move(moveAction) = newAction else { log("Only .move expected"); return -999 }
+
+		let scoreU = world.scoreDiff(factory: moveAction.u, turns: turns, delayed: delayed, orders: orders, newAction: newAction)
+		let scoreV = world.scoreDiff(factory: moveAction.v, turns: turns, delayed: delayed, orders: orders, newAction: newAction)
+		return scoreU + scoreV
+	}
+
+	func score(after turns: Int, orders: PendingOrders, newAction: Action, options: WorldSimulationOptions) -> Int {
+
+		guard turns > 11 else { log("Cannot score for \(turns) turns."); return -999 }
 
 		let loggingWas = loggingEnabled
 		loggingEnabled = false
@@ -948,23 +1232,26 @@ class StrategyAlgorithmHelper {
 		}
 
 
-		var evolvingWorld = world.nextTurn(with: orderCopy)
-		for _ in 1...turns {
-			evolvingWorld = evolvingWorld.nextTurn()
+		var evolvingWorld = world.nextTurn(with: orderCopy, options: .wait)
+		for _ in 1...9 {
+			evolvingWorld = evolvingWorld.nextTurn(options: .wait)
+		}
+		for _ in 10...20 {
+			evolvingWorld = evolvingWorld.nextTurn(options: options)
 		}
 
-		return evolvingWorld.score(owner: Factory.ownerMe) - evolvingWorld.score(owner: Factory.ownerOpponent)
+		return evolvingWorld.scoreDifference(includeProduction: true)
 	}
 
-	func delayedScore(after turns: Int, orders: PendingOrders, newAction: Action) -> Int {
+	func delayedScore(after turns: Int, orders: PendingOrders, newAction: Action, options: WorldSimulationOptions) -> Int {
 
-		guard turns > 2 else { log("Cannot score for \(turns) turns."); return -999 }
+		guard turns > 11 else { log("Cannot score for \(turns) turns."); return -999 }
 
 		let loggingWas = loggingEnabled
 		loggingEnabled = false
 		defer { loggingEnabled = loggingWas }
 
-		var evolvingWorld = world.nextTurn(with: orders)
+		var evolvingWorld = world.nextTurn(with: orders, options: .wait)
 		var newOrder = PendingOrders()
 
 		switch newAction {
@@ -992,12 +1279,15 @@ class StrategyAlgorithmHelper {
 		}
 
 
-		evolvingWorld = world.nextTurn(with: newOrder)
-		for _ in 2...turns {
-			evolvingWorld = evolvingWorld.nextTurn()
+		evolvingWorld = evolvingWorld.nextTurn(with: newOrder, options: .wait)
+		for _ in 2...9 {
+			evolvingWorld = evolvingWorld.nextTurn(options: .wait)
+		}
+		for _ in 10...20 {
+			evolvingWorld = evolvingWorld.nextTurn(options: options)
 		}
 
-		return evolvingWorld.score(owner: Factory.ownerMe) - evolvingWorld.score(owner: Factory.ownerOpponent)
+		return evolvingWorld.scoreDifference(includeProduction: true)
 	}
 }
 
@@ -1054,8 +1344,8 @@ struct BombStrategy: ChainableStrategyProtocol {
 		var output = input
 
 		// TODO: add bombs
-		for edgeEx in helper.myEdgesEx {
-			guard edgeEx.to.owner != Factory.ownerMe else { continue }
+		for edgeEx in helper.myEdgesEx.sorted(by: {a, b in a.dist < b.dist}) {
+			guard edgeEx.to.owner == Factory.ownerOpponent else { continue }
 			guard edgeEx.to.productionRate >= minProduction else { continue }
 			guard edgeEx.to.units >= minUnits else { continue }
 			guard edgeEx.dist <= maxDistance else { continue }
@@ -1077,6 +1367,12 @@ struct BombStrategy: ChainableStrategyProtocol {
 				}
 			}
 			guard samePathAction == nil else { continue }
+
+			let sameDestination = helper.world.bombs
+				.first{ bomb in
+					bomb.destination == v
+				}
+			guard sameDestination == nil else { continue }
 
 			output.actions.append(.bomb(u: edgeEx.from.id, v: edgeEx.to.id))
 		}
@@ -1108,10 +1404,15 @@ struct IncSafe: ChainableStrategyProtocol {
 			var unitsAvailable = factory.units - input.usedCyborgs[fid]
 			var productionRate = factory.productionRate
 
+			let ETA = helper.world.bombs
+				.filter { bomb in bomb.destination == fid}
+				.reduce(99) { acc, bomb in min(acc, bomb.turnsLeft) }
+			if ETA <= 15 { continue }
+
 			while unitsAvailable >= 10 && productionRate < 3 {
 
-				let delayedScore = helper.delayedScore(after: 20, orders: output, newAction: .inc(factory: fid))
-				let immediateScore = helper.score(after: 20, orders: output, newAction: .inc(factory: fid))
+				let delayedScore = helper.delayedScore(after: 20, orders: output, newAction: .inc(factory: fid), options: .wait)
+				let immediateScore = helper.score(after: 20, orders: output, newAction: .inc(factory: fid), options: .wait)
 
 				if immediateScore > delayedScore {
 					output.actions.append(.inc(factory: fid))
@@ -1148,6 +1449,13 @@ struct WatchDog {
 
 	var isBellowRed: Bool {
 		return self.millisecondsFromBegin() < redZone
+	}
+
+	mutating func adjustZones(maxTime: Int) {
+
+		self.greenZone = maxTime * 10 / 50
+		self.yellowZone = maxTime * 30 / 50
+		self.redZone = maxTime * 42 / 50
 	}
 
 	mutating func reset() {
@@ -1193,13 +1501,13 @@ struct SmarterMovement: ChainableStrategyProtocol {
 
 			let availableUnits = helper.world.factories[u].units - output.usedCyborgs[u]
 			let best = helper
-				.binarySearch(0...availableUnits, maxTap: 170 / (total+1)) { units in
-					return helper.score(after: 20, orders: output, newAction: Action.move(u: u, v: v, count: units))
+				.goldenSearch(0...availableUnits, maxTap: 1700 / (total+1)) { units in
+					return helper.fastScore(newAction: Action.move(u: u, v: v, count: units), orders: output, turns: 20, delayed: 0)
 				}
 
 			if best > 0 {
-				let delayedScore = helper.delayedScore(after: 20, orders: output, newAction: Action.move(u: u, v: v, count: best))
-				let immediateScore = helper.score(after: 20, orders: output, newAction: Action.move(u: u, v: v, count: best))
+				let delayedScore = helper.fastScore(newAction: Action.move(u: u, v: v, count: best), orders: output, turns: 20, delayed: 1)
+				let immediateScore = helper.fastScore(newAction: Action.move(u: u, v: v, count: best), orders: output, turns: 20, delayed: 0)
 
 				if immediateScore > delayedScore {
 					output.actions.append(.move(u: u, v: v, count: best))
@@ -1228,13 +1536,13 @@ struct StrategyFactory {
 			let bombStrategy: BombStrategy
 			switch algorithmHelper.world.turn {
 				case 0..<10:
-					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 15, maxDistance: 10, input: orders)
+					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 5, maxDistance: algorithmHelper.world.turn+1, input: orders)
 
 				case 10...50:
-					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 20, maxDistance: 8, input: orders)
+					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 10, maxDistance: 12, input: orders)
 
 				case 50..<100:
-					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 2, minUnits: 30, maxDistance: 5, input: orders)
+					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 2, minUnits: 15, maxDistance: 15, input: orders)
 
 				case 100..<150:
 					bombStrategy = BombStrategy(helper: algorithmHelper, minProduction: 3, minUnits: 10, maxDistance: 20, input: orders)
@@ -1260,17 +1568,6 @@ struct StrategyFactory {
 
 		}
 
-		// INC
-		do {
-			let incSafe = IncSafe(helper: algorithmHelper, input: orders)
-			let actionsBefore = orders.actions.count
-			orders = incSafe.output
-			let actionsAfter = orders.actions.count
-
-			if actionsAfter > actionsBefore {
-				usedStrategies.append(incSafe.name)
-			}
-		}
 
 		// Smart
 		do {
@@ -1283,7 +1580,18 @@ struct StrategyFactory {
 			if actionsAfter > actionsBefore {
 				usedStrategies.append(smart.name)
 			}
-			
+
+		}
+
+		if world.turn > 0 { // But you can if there is no other options
+			let incSafe = IncSafe(helper: algorithmHelper, input: orders)
+			let actionsBefore = orders.actions.count
+			orders = incSafe.output
+			let actionsAfter = orders.actions.count
+
+			if actionsAfter > actionsBefore {
+				usedStrategies.append(incSafe.name)
+			}
 		}
 
 		return (strategyNames: usedStrategies, orders: orders)
@@ -1375,7 +1683,7 @@ for turn in 0..<200 {
 	}
 	else {
 		log("\n--- Stand alone complex @ turn \(turn) ---")
-		world = world.nextTurn(with: expectedOrders)
+		world = world.nextTurn(with: expectedOrders, options: .wait)
 	}
 
 	if feof(stdin) != 0 {
@@ -1392,12 +1700,18 @@ for turn in 0..<200 {
 		log("score mismatch: expected \(expectedScore), got \(score)")
 	}
 
+	// Adjust watchDogTime
+	let maxTime = ( turn == 0 )
+		? 1000
+		: 50
+	watchDog.adjustZones(maxTime: maxTime)
+
 	let algorithmist = StrategyAlgorithmHelper(world: world)
 	var strategyFactory = StrategyFactory(algorithmHelper: algorithmist)
 
 	let chained = strategyFactory.makeChain()
 	expectedOrders = chained.orders
-	expectedScore = world.nextTurn(with: expectedOrders).-->scoreFormat
+	expectedScore = world.nextTurn(with: expectedOrders, options: .wait).-->scoreFormat
 
 	if expectedOrders.actions.count > 0 {
 
